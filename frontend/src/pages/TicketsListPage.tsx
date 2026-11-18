@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle,
   ArrowUpDown,
   ChevronLeft,
   ChevronRight,
@@ -13,8 +12,9 @@ import {
   RotateCcw,
   Search,
 } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
 import { apiRequest } from "../services/api";
-import { CategoryItem, PaginatedTickets } from "../types";
+import { CategoryItem, PaginatedTickets, SupportTeamInfo } from "../types";
 import { PriorityBadge, SLABadge, StatusBadge } from "../components/ui/Badges";
 import { formatDateTime, formatRelativeTime } from "../utils/format";
 
@@ -23,15 +23,16 @@ interface TicketsListPageProps {
 }
 
 export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [searchInput, setSearchInput] = useState(searchParams.get("search") || "");
   const [debouncedSearch, setDebouncedSearch] = useState(searchParams.get("search") || "");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(searchParams.get("status") || "all");
   const [priorityFilter, setPriorityFilter] = useState("all");
   const [categoryId, setCategoryId] = useState<string>("all");
-  const [overdueOnly, setOverdueOnly] = useState(false);
+  const [supportTeamId, setSupportTeamId] = useState<string>("all");
   const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [sortBy, setSortBy] = useState("created_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
@@ -40,6 +41,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
 
   useEffect(() => {
     const urlSearch = searchParams.get("search") || "";
+    setStatusFilter(searchParams.get("status") || "all");
     if (urlSearch !== searchInput) {
       setSearchInput(urlSearch);
       setDebouncedSearch(urlSearch);
@@ -59,6 +61,13 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
     queryFn: () => apiRequest<CategoryItem[]>("/tickets/categories"),
   });
 
+  const { data: supportTeams } = useQuery<SupportTeamInfo[]>({
+    queryKey: ["support-teams"],
+    queryFn: () => apiRequest<SupportTeamInfo[]>("/users/support-teams"),
+    staleTime: 0,
+    refetchOnMount: "always",
+  });
+
   const buildQueryString = () => {
     const params = new URLSearchParams();
     params.set("page", String(page));
@@ -71,7 +80,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
     if (statusFilter !== "all") params.set("status", statusFilter);
     if (priorityFilter !== "all") params.set("priority", priorityFilter);
     if (categoryId !== "all") params.set("category_id", categoryId);
-    if (overdueOnly) params.set("overdue_only", "true");
+    if (supportTeamId !== "all") params.set("support_team_id", supportTeamId);
     if (unassignedOnly && mode === "all") params.set("unassigned_only", "true");
     return params.toString();
   };
@@ -79,18 +88,23 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
   const { data, isLoading, refetch } = useQuery<PaginatedTickets>({
     queryKey: [
       "tickets",
+      user?.id,
+      user?.role,
       mode,
       page,
       debouncedSearch,
       statusFilter,
       priorityFilter,
       categoryId,
-      overdueOnly,
+      supportTeamId,
       unassignedOnly,
       sortBy,
       sortOrder,
     ],
+    refetchInterval: 5000,
     queryFn: () => apiRequest<PaginatedTickets>(`/tickets?${buildQueryString()}`),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const handleResetFilters = () => {
@@ -99,7 +113,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
     setStatusFilter("all");
     setPriorityFilter("all");
     setCategoryId("all");
-    setOverdueOnly(false);
+    setSupportTeamId("all");
     setUnassignedOnly(false);
     setSortBy("created_at");
     setSortOrder("desc");
@@ -118,8 +132,8 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
 
   const titleMap = {
     all: {
-      title: "All Enterprise Tickets",
-      sub: "Complete IT Service Management queue across all departments and support teams.",
+      title: user?.role === "agent" ? "My Team Queue" : "All Enterprise Tickets",
+      sub: user?.role === "agent" ? "Available Open requests for your team. Accepted tickets appear in My Tickets." : "Complete IT Service Management queue across all departments and support teams.",
     },
     my: {
       title: "My Support Tickets",
@@ -127,7 +141,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
     },
     assigned: {
       title: "Assigned to Me",
-      sub: "Your active engineering support queue prioritized by SLA deadline.",
+      sub: "Pending assignments and escalations. Open a ticket to Accept or Reject and Redirect.",
     },
   }[mode];
 
@@ -190,6 +204,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
               <option value="pending">Pending</option>
               <option value="resolved">Resolved</option>
               <option value="closed">Closed</option>
+              <option value="transferred">Transferred</option>
             </select>
           </div>
 
@@ -232,23 +247,23 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
             </select>
           </div>
 
-          {/* Sort Selector */}
+          {/* Support Team Filter Dropdown */}
           <div className="md:col-span-2">
             <select
-              value={`${sortBy}:${sortOrder}`}
+              value={supportTeamId}
               onChange={(e) => {
-                const [field, ord] = e.target.value.split(":");
-                setSortBy(field);
-                setSortOrder(ord as "asc" | "desc");
+                setSupportTeamId(e.target.value);
+                setPage(1);
               }}
-              aria-label="Sort tickets"
+              aria-label="Filter by support team"
               className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700 focus:outline-none focus:border-blue-600"
             >
-              <option value="created_at:desc">Newest First</option>
-              <option value="created_at:asc">Oldest First</option>
-              <option value="updated_at:desc">Recently Updated</option>
-              <option value="resolution_due_at:asc">SLA Due Soonest</option>
-              <option value="priority:asc">Priority</option>
+              <option value="all">All Support Teams</option>
+              {supportTeams?.map((team) => (
+                <option key={team.id} value={String(team.id)}>
+                  {team.name} ({team.code})
+                </option>
+              ))}
             </select>
           </div>
         </div>
@@ -260,22 +275,6 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
               <Filter className="w-3.5 h-3.5" />
               Quick Filters:
             </span>
-            <button
-              type="button"
-              onClick={() => {
-                setOverdueOnly(!overdueOnly);
-                setPage(1);
-              }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium border transition-colors cursor-pointer ${
-                overdueOnly
-                  ? "bg-red-50 text-red-700 border-red-200"
-                  : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
-              }`}
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              Overdue / SLA Breach Only
-            </button>
-
             {mode === "all" && (
               <button
                 type="button"
@@ -297,7 +296,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
               statusFilter !== "all" ||
               priorityFilter !== "all" ||
               categoryId !== "all" ||
-              overdueOnly ||
+              supportTeamId !== "all" ||
               unassignedOnly) && (
               <button
                 type="button"
@@ -388,6 +387,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
                     </td>
                     <td className="py-3.5 px-4 max-w-sm">
                       <p className="font-semibold text-slate-900 truncate">{t.subject}</p>
+                      {t.routed_by && <p className="mt-1 text-[11px] text-cyan-800">From {t.routed_by.full_name} · {t.routed_by.support_team_name || t.routed_by.role} · {t.previous_ticket_number}</p>}
                       <div className="flex items-center gap-3 mt-0.5 text-[11px] text-slate-500">
                         {t.affected_service && (
                           <span className="truncate">{t.affected_service}</span>
@@ -433,6 +433,7 @@ export const TicketsListPage: React.FC<TicketsListPageProps> = ({ mode }) => {
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap">
                       <StatusBadge status={t.status} />
+                      {t.transfer_outcome && <span className="ml-1 rounded bg-cyan-50 px-2 py-0.5 text-[11px] font-semibold text-cyan-800">Transferred</span>}
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap">
                       <SLABadge health={t.sla_health} />

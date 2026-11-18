@@ -16,6 +16,38 @@ class LogoutRequest(BaseModel):
     refresh_token: Optional[str] = None
 
 
+class AdminProfileUpdateRequest(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=150)
+    email: EmailStr
+    employee_id: Optional[str] = Field(None, max_length=50)
+    job_title: Optional[str] = Field(None, max_length=120)
+    phone: Optional[str] = Field(None, max_length=40)
+    department_id: Optional[int] = None
+    support_team_id: Optional[int] = None
+    new_password: Optional[str] = Field(None, min_length=4, max_length=128)
+
+
+class ForgotPasswordOTPRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: str = Field(..., min_length=6, max_length=40)
+
+
+class ForgotPasswordOTPResponse(BaseModel):
+    success: bool
+    message: str
+    masked_phone: str
+    email: str
+    expires_in_seconds: int
+    dev_otp_code: Optional[str] = None
+
+
+class ForgotPasswordResetRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: str = Field(..., min_length=6, max_length=40)
+    otp_code: str = Field(..., min_length=6, max_length=6)
+    new_password: str = Field(..., min_length=4, max_length=128)
+
+
 class UserRoleInfo(BaseModel):
     id: int
     name: str

@@ -21,6 +21,7 @@ export const StatusBadge: React.FC<{ status: TicketStatus | string; className?: 
     pending: "bg-purple-50 text-purple-700 border-purple-200",
     resolved: "bg-emerald-50 text-emerald-700 border-emerald-200",
     closed: "bg-slate-100 text-slate-600 border-slate-200",
+    transferred: "bg-cyan-50 text-cyan-800 border-cyan-200",
   };
 
   const dotColors: Record<string, string> = {
@@ -30,6 +31,7 @@ export const StatusBadge: React.FC<{ status: TicketStatus | string; className?: 
     pending: "bg-purple-600",
     resolved: "bg-emerald-600",
     closed: "bg-slate-400",
+    transferred: "bg-cyan-600",
   };
 
   return (
@@ -75,6 +77,9 @@ export const SLABadge: React.FC<{
   health: "within_sla" | "at_risk" | "breached" | "met" | string;
   className?: string;
 }> = ({ health, className }) => {
+  if (health === "closed") {
+    return <span className={cn("inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700", className)}><ShieldCheck className="h-3.5 w-3.5" />Closed</span>;
+  }
   if (health === "breached") {
     return (
       <span

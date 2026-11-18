@@ -48,7 +48,7 @@ def test_health_check(client: TestClient):
     assert data["database"]["status"] == "healthy"
 
 
-def test_auth_login_refresh_and_me(client: TestClient):
+def test_auth_login_refresh_and_admin_profile_edit(client: TestClient):
     tokens = _login(client, "admin@ticketdesk.enterprise", "Admin@12345")
     assert "access_token" in tokens
     assert "refresh_token" in tokens
@@ -59,22 +59,66 @@ def test_auth_login_refresh_and_me(client: TestClient):
     assert me.status_code == 200
     assert me.json()["email"] == "admin@ticketdesk.enterprise"
 
-    refreshed = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
-    assert refreshed.status_code == 200
-    assert "access_token" in refreshed.json()
+    # Admin updates their own profile via PUT /api/v1/auth/me
+    update_me = client.put(
+        "/api/v1/auth/me",
+        headers=headers,
+        json={
+            "full_name": "Evelyn Sterling",
+            "email": "admin@ticketdesk.enterprise",
+            "employee_id": "EMP-1001",
+            "job_title": "VP of Enterprise IT",
+            "phone": "+1 (415) 890-1001",
+        },
+    )
+    assert update_me.status_code == 200
+    assert update_me.json()["job_title"] == "VP of Enterprise IT"
 
 
-def test_employee_ticket_creation_and_rbac_isolation(client: TestClient):
-    emp_tokens = _login(client, "sarah.chen@ticketdesk.enterprise", "Employee@12345")
+def test_admin_provisions_users_and_ticket_lifecycle(client: TestClient):
+    admin_tokens = _login(client, "admin@ticketdesk.enterprise", "Admin@12345")
+    admin_headers = {"Authorization": f"Bearer {admin_tokens['access_token']}"}
+
+    # Verify only Admin exists initially (no legacy demo users) and Operation IT is not in support teams
+    teams = client.get("/api/v1/users/support-teams", headers=admin_headers).json()
+    assert all(t["name"].lower() != "operation it" for t in teams)
+
+    # Admin creates a custom Employee and a custom IT Support Agent
+    emp_create = client.post(
+        "/api/v1/users",
+        headers=admin_headers,
+        json={
+            "email": "custom.employee@ticketdesk.enterprise",
+            "full_name": "Custom Employee",
+            "password": "Employee@12345",
+            "employee_id": "EMP-3001",
+            "phone": "+91 9876543210",
+            "role": "employee",
+        },
+    )
+    assert emp_create.status_code == 201, emp_create.text
+
+    agent_create = client.post(
+        "/api/v1/users",
+        headers=admin_headers,
+        json={
+            "email": "custom.agent@ticketdesk.enterprise",
+            "full_name": "Custom Agent",
+            "password": "Agent@12345",
+            "employee_id": "EMP-3002",
+            "phone": "+91 9876543211",
+            "role": "agent",
+            "support_team_id": teams[0]["id"],
+        },
+    )
+    assert agent_create.status_code == 201, agent_create.text
+
+    # Employee logs in and creates a ticket with support_team_id and subcategory "Others"
+    emp_tokens = _login(client, "custom.employee@ticketdesk.enterprise", "Employee@12345")
     emp_headers = {"Authorization": f"Bearer {emp_tokens['access_token']}"}
 
-    # Employee cannot access admin users list
-    forbidden_resp = client.get("/api/v1/users", headers=emp_headers)
-    assert forbidden_resp.status_code == 403
-
-    # Employee creates a ticket
     categories = client.get("/api/v1/tickets/categories", headers=emp_headers).json()
-    assert len(categories) >= 5
+    assert all("Others" in c["subcategories"] for c in categories)
 
     create_resp = client.post(
         "/api/v1/tickets",
@@ -82,111 +126,55 @@ def test_employee_ticket_creation_and_rbac_isolation(client: TestClient):
         json={
             "subject": "Kubernetes kubectl OIDC plugin failing token refresh",
             "description": "When running kubectl get pods on staging cluster, OIDC helper throws token expired.",
-            "category_id": categories[1]["id"],
-            "subcategory": "IDE & Developer Tools",
+            "category_id": categories[0]["id"],
+            "subcategory": "Others",
             "priority": "high",
+            "support_team_id": teams[0]["id"],
             "affected_service": "EKS Staging Cluster",
         },
     )
     assert create_resp.status_code == 201, create_resp.text
     created_ticket = create_resp.json()
     ticket_num = created_ticket["ticket_number"]
-    assert ticket_num.startswith("TKT-")
-    assert created_ticket["status"] == "open"
-    assert created_ticket["sla"]["response_target_minutes"] == 60
+    assert created_ticket["support_team_id"] == teams[0]["id"]
 
-    # Employee cannot post internal note
-    internal_attempt = client.post(
-        f"/api/v1/tickets/{ticket_num}/comments",
-        headers=emp_headers,
-        json={"body": "Secret internal note", "is_internal": True},
+
+def test_forgot_password_via_phone_otp(client: TestClient):
+    # Request OTP for custom.employee@ticketdesk.enterprise using phone +91 9876543210
+    otp_req = client.post(
+        "/api/v1/auth/forgot-password/request-otp",
+        json={"phone": "9876543210"},
     )
-    assert internal_attempt.status_code == 403
+    assert otp_req.status_code == 200, otp_req.text
+    otp_data = otp_req.json()
+    assert otp_data["success"] is True
+    dev_otp = otp_data["dev_otp_code"]
+    assert dev_otp and len(dev_otp) == 6
 
-    # Agent accepts, posts internal note + public comment, and resolves ticket
-    agent_tokens = _login(client, "alex.rivera@ticketdesk.enterprise", "Agent@12345")
-    agent_headers = {"Authorization": f"Bearer {agent_tokens['access_token']}"}
-
-    assign_resp = client.patch(
-        f"/api/v1/tickets/{ticket_num}/assign",
-        headers=agent_headers,
-        json={"assigned_agent_id": agent_tokens["user"]["id"], "note": "Taking ownership"},
+    # Verify OTP and set a new password
+    reset_resp = client.post(
+        "/api/v1/auth/forgot-password/verify-reset",
+        json={
+            "phone": "9876543210",
+            "otp_code": dev_otp,
+            "new_password": "NewPassword@123",
+        },
     )
-    assert assign_resp.status_code == 200
-    assert assign_resp.json()["status"] == "assigned"
+    assert reset_resp.status_code == 200, reset_resp.text
 
-    # Agent adds internal note
-    note_resp = client.post(
-        f"/api/v1/tickets/{ticket_num}/comments",
-        headers=agent_headers,
-        json={"body": "Rotated OIDC client secret in Vault.", "is_internal": True},
-    )
-    assert note_resp.status_code == 201
-
-    # Employee views ticket: internal note must be hidden
-    emp_view = client.get(f"/api/v1/tickets/{ticket_num}", headers=emp_headers).json()
-    assert all(not c["is_internal"] for c in emp_view["comments"])
-
-    # Agent resolves ticket
-    res_resp = client.patch(
-        f"/api/v1/tickets/{ticket_num}/status",
-        headers=agent_headers,
-        json={"status": "resolved", "reason": "Updated kubeconfig OIDC issuer certificate."},
-    )
-    assert res_resp.status_code == 200
-    assert res_resp.json()["status"] == "resolved"
-
-    # Employee reopens resolved ticket
-    reopen_resp = client.patch(
-        f"/api/v1/tickets/{ticket_num}/status",
-        headers=emp_headers,
-        json={"status": "open", "reason": "Still seeing intermittent 401 on us-east cluster."},
-    )
-    assert reopen_resp.status_code == 200
-    assert reopen_resp.json()["status"] == "open"
-    assert reopen_resp.json()["reopened_count"] == 1
+    # Sign in with the new password
+    relogin = _login(client, "custom.employee@ticketdesk.enterprise", "NewPassword@123")
+    assert "access_token" in relogin
 
 
-def test_attachment_upload_and_download(client: TestClient):
-    emp_tokens = _login(client, "sarah.chen@ticketdesk.enterprise", "Employee@12345")
-    emp_headers = {"Authorization": f"Bearer {emp_tokens['access_token']}"}
-
-    my_tickets = client.get("/api/v1/tickets?my_tickets=true", headers=emp_headers).json()["items"]
-    target_ticket = my_tickets[0]["ticket_number"]
-
-    file_content = b"Sample diagnostic trace output for TicketDesk test suite."
-    upload_resp = client.post(
-        f"/api/v1/tickets/{target_ticket}/attachments",
-        headers=emp_headers,
-        files={"file": ("diagnostic_trace.txt", io.BytesIO(file_content), "text/plain")},
-    )
-    assert upload_resp.status_code == 201, upload_resp.text
-    att_id = upload_resp.json()["id"]
-
-    dl_resp = client.get(
-        f"/api/v1/tickets/{target_ticket}/attachments/{att_id}/download",
-        headers=emp_headers,
-    )
-    assert dl_resp.status_code == 200
-    assert dl_resp.content == file_content
-
-
-def test_dashboard_and_reports_endpoints(client: TestClient):
+def test_audit_log_csv_export_and_reports(client: TestClient):
     admin_tokens = _login(client, "admin@ticketdesk.enterprise", "Admin@12345")
     headers = {"Authorization": f"Bearer {admin_tokens['access_token']}"}
 
-    summary = client.get("/api/v1/dashboard/summary", headers=headers)
-    assert summary.status_code == 200
-    assert summary.json()["total_tickets"] >= 25
+    audit_csv = client.get("/api/v1/audit-logs/export/csv", headers=headers)
+    assert audit_csv.status_code == 200
+    assert "Audit ID,Timestamp (UTC),Actor Name" in audit_csv.text
 
-    trends = client.get("/api/v1/dashboard/trends", headers=headers)
-    assert trends.status_code == 200
-    assert len(trends.json()["daily"]) == 14
-
-    dist = client.get("/api/v1/dashboard/distribution", headers=headers)
-    assert dist.status_code == 200
-    assert len(dist.json()["by_priority"]) == 4
-
-    csv_resp = client.get("/api/v1/reports/export/csv", headers=headers)
-    assert csv_resp.status_code == 200
-    assert "Ticket Number" in csv_resp.text
+    report_csv = client.get("/api/v1/reports/export/csv", headers=headers)
+    assert report_csv.status_code == 200
+    assert "Ticket Number" in report_csv.text

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clock, Edit3, Info, Save, ShieldCheck, X } from "lucide-react";
+import { CheckCircle2, Clock, Edit3, Save, ShieldCheck, X } from "lucide-react";
 import { apiRequest } from "../services/api";
 import { SLAPolicyItem } from "../types";
 import { PriorityBadge } from "../components/ui/Badges";
@@ -132,26 +132,6 @@ export const SLAManagementPage: React.FC = () => {
                 </div>
               </div>
             ))}
-      </div>
-
-      {/* Business-Hours & Timezone Assumption Documentation Box */}
-      <div className="bg-navy-900 text-white rounded-xl p-6 shadow-2xs space-y-2">
-        <div className="flex items-center gap-2 text-blue-400">
-          <Info className="w-4 h-4" />
-          <h3 className="text-xs font-bold uppercase tracking-wider">
-            SLA Evaluation Engine & Timezone Assumptions
-          </h3>
-        </div>
-        <p className="text-xs text-slate-300 leading-relaxed">
-          All ticket timestamps (<code className="text-blue-300">sla_started_at</code>,{" "}
-          <code className="text-blue-300">first_response_due_at</code>,{" "}
-          <code className="text-blue-300">resolution_due_at</code>, and{" "}
-          <code className="text-blue-300">resolved_at</code>) are stored in PostgreSQL as{" "}
-          <strong>timezone-aware UTC timestamps</strong>. Critical (P1) and High (P2) incidents are
-          evaluated on a 24x7 continuous clock, while Medium (P3) and Low (P4) policies record the
-          standard business-hours operating assumption (Mon–Fri 08:00–18:00 UTC). Changing a
-          ticket's priority dynamically recalculates its SLA deadlines from its creation timestamp.
-        </p>
       </div>
 
       {/* Edit SLA Modal */}

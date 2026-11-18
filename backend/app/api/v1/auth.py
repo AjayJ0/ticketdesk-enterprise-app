@@ -1,22 +1,32 @@
+import re
+import secrets
+import time
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_admin
 from app.core.exceptions import AppException
+from app.core.logging_config import logger
 from app.core.security import (
     create_access_token,
     create_refresh_token_value,
+    get_password_hash,
     hash_token,
     verify_password,
 )
 from app.middleware.rate_limit import get_client_ip, login_rate_limiter
 from app.models.user import RefreshToken, User
 from app.schemas.auth import (
+    AdminProfileUpdateRequest,
     AuthUserResponse,
     DepartmentInfo,
+    ForgotPasswordOTPRequest,
+    ForgotPasswordOTPResponse,
+    ForgotPasswordResetRequest,
     LoginRequest,
     LogoutRequest,
     RefreshTokenRequest,
@@ -28,6 +38,88 @@ from app.services.audit_service import record_audit_log
 from app.services.sla_service import ensure_utc
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# In-memory OTP store: key = user_id -> {otp_hash, expires_at, phone_digits, attempts}
+_otp_store: dict[int, dict] = {}
+_otp_lock = Lock()
+OTP_EXPIRY_SECONDS = 600
+
+
+def _normalize_phone_digits(phone: str | None) -> str:
+    if not phone:
+        return ""
+    return re.sub(r"\D", "", phone)
+
+
+def _mask_phone(phone: str) -> str:
+    digits = _normalize_phone_digits(phone)
+    if len(digits) <= 4:
+        return phone
+    return f"{'*' * (len(digits) - 4)}{digits[-4:]}"
+
+
+def _find_user_for_otp(db: Session, email: str | None, phone: str) -> User:
+    input_digits = _normalize_phone_digits(phone)
+    if len(input_digits) < 6:
+        raise AppException(
+            message="Please enter a valid phone number (at least 6 digits).",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code="INVALID_PHONE_NUMBER",
+        )
+
+    user: User | None = None
+    if email and email.strip():
+        user = (
+            db.query(User)
+            .filter(func.lower(User.email) == email.lower().strip())
+            .first()
+        )
+        if not user:
+            raise AppException(
+                message="No active user account found with that email address.",
+                status_code=status.HTTP_404_NOT_FOUND,
+                error_code="USER_NOT_FOUND",
+            )
+        user_digits = _normalize_phone_digits(user.phone)
+        # Allow matching either full digits or last 10 digits, or if user has no phone saved yet, bind it
+        if user_digits:
+            if not (
+                user_digits == input_digits
+                or user_digits[-10:] == input_digits[-10:]
+            ):
+                raise AppException(
+                    message="The phone number entered does not match the phone number registered on this account.",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    error_code="PHONE_MISMATCH",
+                )
+        else:
+            user.phone = phone.strip()
+            db.commit()
+    else:
+        # Lookup user directly by phone digits
+        active_users = db.query(User).filter(User.is_active == True).all()  # noqa: E712
+        for candidate in active_users:
+            cand_digits = _normalize_phone_digits(candidate.phone)
+            if cand_digits and (
+                cand_digits == input_digits
+                or cand_digits[-10:] == input_digits[-10:]
+            ):
+                user = candidate
+                break
+        if not user:
+            raise AppException(
+                message="No active user account found matching that phone number. Try providing your corporate email as well.",
+                status_code=status.HTTP_404_NOT_FOUND,
+                error_code="PHONE_NOT_FOUND",
+            )
+
+    if not user.is_active:
+        raise AppException(
+            message="This user account is deactivated. Contact an administrator.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            error_code="ACCOUNT_DEACTIVATED",
+        )
+    return user
 
 
 def build_auth_user_response(user: User) -> AuthUserResponse:
@@ -82,11 +174,13 @@ def login(
     now = datetime.now(timezone.utc)
     user.last_login_at = now
 
-    access_token = create_access_token(subject=user.id, role=user.role)
+    access_token = create_access_token(subject=user.id, role=user.role, session_identity=user.session_identity)
     raw_refresh = create_refresh_token_value()
     refresh_record = RefreshToken(
         user_id=user.id,
         token_hash=hash_token(raw_refresh),
+        session_identity=user.session_identity,
+        role_at_issue=user.role,
         expires_at=now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
         revoked=False,
         user_agent=request.headers.get("User-Agent", "")[:255],
@@ -115,6 +209,117 @@ def login(
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=build_auth_user_response(user),
     )
+
+
+@router.post("/forgot-password/request-otp", response_model=ForgotPasswordOTPResponse)
+def request_password_reset_otp(
+    payload: ForgotPasswordOTPRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ForgotPasswordOTPResponse:
+    user = _find_user_for_otp(db, payload.email, payload.phone)
+    otp_code = f"{secrets.randbelow(900000) + 100000:06d}"
+    phone_digits = _normalize_phone_digits(payload.phone)
+
+    with _otp_lock:
+        _otp_store[user.id] = {
+            "otp_hash": hash_token(otp_code),
+            "expires_at": time.time() + OTP_EXPIRY_SECONDS,
+            "phone_digits": phone_digits[-10:],
+            "attempts": 0,
+        }
+
+    masked = _mask_phone(user.phone or payload.phone)
+    logger.info(
+        f"[OTP AUTHENTICATOR] Generated 6-digit OTP {otp_code} for user {user.email} (phone {masked})"
+    )
+
+    record_audit_log(
+        db=db,
+        user_id=user.id,
+        action="PASSWORD_OTP_REQUESTED",
+        entity_type="user",
+        entity_id=user.id,
+        metadata={"email": user.email, "masked_phone": masked},
+        ip_address=get_client_ip(request),
+    )
+    db.commit()
+
+    return ForgotPasswordOTPResponse(
+        success=True,
+        message=f"A 6-digit verification OTP has been sent to your registered phone ({masked}).",
+        masked_phone=masked,
+        email=user.email,
+        expires_in_seconds=OTP_EXPIRY_SECONDS,
+        dev_otp_code=otp_code if settings.APP_ENV != "production" else None,
+    )
+
+
+@router.post("/forgot-password/verify-reset")
+def verify_otp_and_reset_password(
+    payload: ForgotPasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    user = _find_user_for_otp(db, payload.email, payload.phone)
+
+    with _otp_lock:
+        entry = _otp_store.get(user.id)
+        if not entry:
+            raise AppException(
+                message="No active OTP request found. Please request a new OTP code.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code="OTP_NOT_FOUND",
+            )
+        if time.time() > entry["expires_at"]:
+            _otp_store.pop(user.id, None)
+            raise AppException(
+                message="Your OTP code has expired. Please request a new OTP.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code="OTP_EXPIRED",
+            )
+        entry["attempts"] += 1
+        if entry["attempts"] > 5:
+            _otp_store.pop(user.id, None)
+            raise AppException(
+                message="Too many invalid OTP attempts. Please request a new OTP.",
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                error_code="OTP_MAX_ATTEMPTS",
+            )
+        if entry["otp_hash"] != hash_token(payload.otp_code.strip()):
+            raise AppException(
+                message="Invalid 6-digit OTP verification code.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code="INVALID_OTP_CODE",
+            )
+        # Validated — consume OTP
+        _otp_store.pop(user.id, None)
+
+    now = datetime.now(timezone.utc)
+    user.hashed_password = get_password_hash(payload.new_password)
+    user.updated_at = now
+
+    # Revoke any existing refresh tokens
+    db.query(RefreshToken).filter(
+        RefreshToken.user_id == user.id,
+        RefreshToken.revoked == False,  # noqa: E712
+    ).update({"revoked": True, "revoked_at": now})
+
+    record_audit_log(
+        db=db,
+        user_id=user.id,
+        action="PASSWORD_RESET_VIA_OTP",
+        entity_type="user",
+        entity_id=user.id,
+        metadata={"email": user.email, "method": "phone_otp"},
+        ip_address=get_client_ip(request),
+    )
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Password has been reset successfully. You may now sign in with your new password.",
+    }
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -153,7 +358,9 @@ def refresh_access_token(
             error_code="USER_INACTIVE",
         )
 
-    # Rotate refresh token
+    if not user.session_identity or record.session_identity != user.session_identity or record.role_at_issue != user.role:
+        raise AppException("The account or role changed. Please sign in explicitly.", status.HTTP_401_UNAUTHORIZED, "SESSION_IDENTITY_CHANGED")
+
     record.revoked = True
     record.revoked_at = now
 
@@ -161,6 +368,8 @@ def refresh_access_token(
     new_record = RefreshToken(
         user_id=user.id,
         token_hash=hash_token(new_refresh_raw),
+        session_identity=user.session_identity,
+        role_at_issue=user.role,
         expires_at=now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
         revoked=False,
         user_agent=request.headers.get("User-Agent", "")[:255],
@@ -170,7 +379,7 @@ def refresh_access_token(
     db.add(new_record)
     db.commit()
 
-    access_token = create_access_token(subject=user.id, role=user.role)
+    access_token = create_access_token(subject=user.id, role=user.role, session_identity=user.session_identity)
     return TokenResponse(
         access_token=access_token,
         refresh_token=new_refresh_raw,
@@ -201,7 +410,6 @@ def logout(
             record.revoked = True
             record.revoked_at = now
     else:
-        # Revoke all active refresh tokens for this user
         db.query(RefreshToken).filter(
             RefreshToken.user_id == current_user.id,
             RefreshToken.revoked == False,  # noqa: E712
@@ -221,4 +429,59 @@ def logout(
 
 @router.get("/me", response_model=AuthUserResponse)
 def get_me(current_user: User = Depends(get_current_user)) -> AuthUserResponse:
+    return build_auth_user_response(current_user)
+
+
+@router.put("/me", response_model=AuthUserResponse)
+def update_admin_profile(
+    payload: AdminProfileUpdateRequest,
+    request: Request,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AuthUserResponse:
+    """Allow Administrators to edit and save their own profile attributes directly."""
+    email_clean = payload.email.lower().strip()
+    if email_clean != current_user.email.lower():
+        dup = db.query(User).filter(func.lower(User.email) == email_clean, User.id != current_user.id).first()
+        if dup:
+            raise AppException("Another user already uses this email address.", status.HTTP_409_CONFLICT)
+        current_user.email = email_clean
+
+    if payload.employee_id is not None:
+        emp_clean = payload.employee_id.strip() or None
+        if emp_clean and emp_clean != current_user.employee_id:
+            dup_emp = db.query(User).filter(User.employee_id == emp_clean, User.id != current_user.id).first()
+            if dup_emp:
+                raise AppException("Employee ID is already assigned to another user.", status.HTTP_409_CONFLICT)
+        current_user.employee_id = emp_clean
+
+    current_user.full_name = payload.full_name.strip()
+    current_user.job_title = payload.job_title.strip() if payload.job_title else None
+    current_user.phone = payload.phone.strip() if payload.phone else None
+
+    if payload.department_id is not None:
+        current_user.department_id = payload.department_id if payload.department_id > 0 else None
+    if payload.support_team_id is not None:
+        current_user.support_team_id = payload.support_team_id if payload.support_team_id > 0 else None
+    if payload.new_password:
+        current_user.hashed_password = get_password_hash(payload.new_password)
+
+    current_user.updated_at = datetime.now(timezone.utc)
+
+    record_audit_log(
+        db=db,
+        user_id=current_user.id,
+        action="ADMIN_PROFILE_UPDATED",
+        entity_type="user",
+        entity_id=current_user.id,
+        metadata={
+            "full_name": current_user.full_name,
+            "email": current_user.email,
+            "employee_id": current_user.employee_id,
+            "phone": current_user.phone,
+        },
+        ip_address=get_client_ip(request),
+    )
+    db.commit()
+    db.refresh(current_user)
     return build_auth_user_response(current_user)

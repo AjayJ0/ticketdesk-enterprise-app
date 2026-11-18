@@ -74,3 +74,12 @@ class SystemSetting(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
     updated_by = relationship("User", lazy="joined")
+
+
+class SLAAlertDelivery(Base):
+    """Idempotency ledger for one resolution-breach notification per recipient/ticket."""
+    __tablename__ = "sla_alert_deliveries"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)

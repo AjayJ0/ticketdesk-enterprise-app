@@ -10,7 +10,9 @@ class DashboardSummaryResponse(BaseModel):
     in_progress_tickets: int
     pending_tickets: int
     resolved_tickets: int
+    transferred_tickets: int = 0
     closed_tickets: int
+    sla_alerts_today: int = 0
     overdue_tickets: int
     avg_resolution_hours: float
     sla_compliance_percentage: float

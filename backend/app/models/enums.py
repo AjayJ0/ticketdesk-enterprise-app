@@ -21,10 +21,12 @@ class TicketStatus(str, Enum):
     PENDING = "pending"
     RESOLVED = "resolved"
     CLOSED = "closed"
+    TRANSFERRED = "transferred"
 
 
 # Valid state transitions for tickets
 VALID_STATUS_TRANSITIONS: dict[TicketStatus, set[TicketStatus]] = {
+    TicketStatus.TRANSFERRED: set(),
     TicketStatus.OPEN: {
         TicketStatus.ASSIGNED,
         TicketStatus.IN_PROGRESS,

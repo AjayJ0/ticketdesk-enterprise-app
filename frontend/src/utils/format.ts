@@ -59,6 +59,7 @@ export function formatStatusLabel(status: TicketStatus | string): string {
     pending: "Pending",
     resolved: "Resolved",
     closed: "Closed",
+    transferred: "Transferred",
   };
   return map[status] || status;
 }

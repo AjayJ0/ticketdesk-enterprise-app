@@ -26,6 +26,7 @@ def create_access_token(
     subject: str | int,
     role: str,
     expires_delta: Optional[timedelta] = None,
+    session_identity: Optional[str] = None,
 ) -> str:
     now = datetime.now(timezone.utc)
     if expires_delta:
@@ -36,6 +37,7 @@ def create_access_token(
     to_encode: Dict[str, Any] = {
         "sub": str(subject),
         "role": role,
+        "sid": session_identity,
         "type": "access",
         "iat": now,
         "exp": expire,

@@ -3,13 +3,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   Building2,
+  CheckCircle2,
   Edit3,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Mail,
+  Phone,
   Plus,
   Search,
   Shield,
+  Trash2,
   UserCheck,
   UserPlus,
   UserX,
+  Users,
   X,
 } from "lucide-react";
 import { ApiError, apiRequest } from "../services/api";
@@ -36,24 +44,35 @@ export const UserManagementPage: React.FC = () => {
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [deptFilter, setDeptFilter] = useState("all");
+  const [teamFilter, setTeamFilter] = useState("all");
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editUser, setEditUser] = useState<UserDetail | null>(null);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Create user form state
   const [newEmail, setNewEmail] = useState("");
   const [newName, setNewName] = useState("");
-  const [newPassword, setNewPassword] = useState("Welcome@12345");
+  const [newPassword, setNewPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(true);
   const [newEmpId, setNewEmpId] = useState("");
   const [newTitle, setNewTitle] = useState("");
-  const [newRole, setNewRole] = useState<RoleType>("employee");
+  const [newPhone, setNewPhone] = useState("");
+  const [newRole, setNewRole] = useState<RoleType>("agent");
   const [newDeptId, setNewDeptId] = useState<string>("");
   const [newTeamId, setNewTeamId] = useState<string>("");
+  const [newDepartmentName, setNewDepartmentName] = useState("");
+  const [newSupportTeamName, setNewSupportTeamName] = useState("");
 
   // Edit user form state
   const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [showEditPassword, setShowEditPassword] = useState(false);
+  const [editEmpId, setEditEmpId] = useState("");
   const [editTitle, setEditTitle] = useState("");
+  const [editPhone, setEditPhone] = useState("");
   const [editRole, setEditRole] = useState<RoleType>("employee");
   const [editDeptId, setEditDeptId] = useState<string>("");
   const [editTeamId, setEditTeamId] = useState<string>("");
@@ -72,6 +91,8 @@ export const UserManagementPage: React.FC = () => {
   const { data: supportTeams } = useQuery<SupportTeamInfo[]>({
     queryKey: ["support-teams"],
     queryFn: () => apiRequest<SupportTeamInfo[]>("/users/support-teams"),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const buildQuery = () => {
@@ -81,13 +102,19 @@ export const UserManagementPage: React.FC = () => {
     if (search.trim()) params.set("search", search.trim());
     if (roleFilter !== "all") params.set("role", roleFilter);
     if (deptFilter !== "all") params.set("department_id", deptFilter);
+    if (teamFilter !== "all") params.set("support_team_id", teamFilter);
     return params.toString();
   };
 
   const { data: usersData, isLoading } = useQuery<PaginatedUsers>({
-    queryKey: ["admin-users", search, roleFilter, deptFilter],
+    queryKey: ["admin-users", search, roleFilter, deptFilter, teamFilter],
     queryFn: () => apiRequest<PaginatedUsers>(`/users?${buildQuery()}`),
   });
+
+  const showSuccess = (msg: string) => {
+    setSuccessMsg(msg);
+    setTimeout(() => setSuccessMsg(null), 4000);
+  };
 
   const createUserMutation = useMutation({
     mutationFn: () =>
@@ -99,20 +126,34 @@ export const UserManagementPage: React.FC = () => {
           password: newPassword,
           employee_id: newEmpId || null,
           job_title: newTitle || null,
+          phone: newPhone || null,
           role: newRole,
-          department_id: newDeptId ? Number(newDeptId) : null,
-          support_team_id: newTeamId ? Number(newTeamId) : null,
+            department_id: newDeptId && newDeptId !== "new" ? Number(newDeptId) : null,
+            support_team_id: newTeamId && newTeamId !== "new" ? Number(newTeamId) : null,
+            department_name: newDeptId === "new" ? newDepartmentName.trim() : undefined,
+            support_team_name: newTeamId === "new" ? newSupportTeamName.trim() : undefined,
           is_active: true,
         }),
       }),
-    onSuccess: () => {
+    onSuccess: (created) => {
       setCreateModalOpen(false);
       setNewEmail("");
       setNewName("");
+      setNewPassword("");
       setNewEmpId("");
       setNewTitle("");
+      setNewPhone("");
+      setNewTeamId("");
+      setNewRole("agent");
+      setNewDeptId("");
+      setNewDepartmentName("");
+      setNewSupportTeamName("");
       setErrorMsg(null);
+      queryClient.invalidateQueries({ queryKey: ["departments"] });
+      queryClient.invalidateQueries({ queryKey: ["support-teams"] });
+      showSuccess(`User '${created.full_name}' (${created.email}) created successfully. They can sign in with the email and password you entered.`);
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      queryClient.invalidateQueries({ queryKey: ["support-agents"] });
     },
     onError: (err: unknown) => {
       setErrorMsg(err instanceof ApiError ? err.message : "Failed to create user.");
@@ -126,10 +167,16 @@ export const UserManagementPage: React.FC = () => {
         method: "PUT",
         body: JSON.stringify({
           full_name: editName,
+          email: editEmail,
+          employee_id: editEmpId,
           job_title: editTitle || null,
-          department_id: editDeptId ? Number(editDeptId) : 0,
-          support_team_id: editTeamId ? Number(editTeamId) : 0,
+          phone: editPhone || null,
+          ...(editRole !== "admin" ? {
+            department_id: editDeptId ? Number(editDeptId) : 0,
+            support_team_id: editTeamId ? Number(editTeamId) : 0,
+          } : {}),
           is_active: editActive,
+          password: editPassword.trim() ? editPassword.trim() : null,
         }),
       });
       if (editRole !== editUser.role) {
@@ -137,7 +184,7 @@ export const UserManagementPage: React.FC = () => {
           method: "PATCH",
           body: JSON.stringify({
             role: editRole,
-            support_team_id: editTeamId ? Number(editTeamId) : 0,
+            support_team_id: editRole === "admin" ? 0 : editTeamId ? Number(editTeamId) : 0,
           }),
         });
       }
@@ -145,6 +192,7 @@ export const UserManagementPage: React.FC = () => {
     onSuccess: () => {
       setEditUser(null);
       setErrorMsg(null);
+      showSuccess("User account updated in PostgreSQL.");
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
       queryClient.invalidateQueries({ queryKey: ["support-agents"] });
     },
@@ -167,6 +215,19 @@ export const UserManagementPage: React.FC = () => {
     },
   });
 
+  const deleteUserMutation = useMutation({
+    mutationFn: (userId: number) =>
+      apiRequest(`/users/${userId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      showSuccess("User removed from database.");
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      queryClient.invalidateQueries({ queryKey: ["support-agents"] });
+    },
+    onError: (err: unknown) => {
+      setErrorMsg(err instanceof ApiError ? err.message : "Failed to delete user.");
+    },
+  });
+
   const createTeamMutation = useMutation({
     mutationFn: () =>
       apiRequest("/users/support-teams", {
@@ -182,6 +243,7 @@ export const UserManagementPage: React.FC = () => {
       setTeamName("");
       setTeamCode("");
       setTeamSpec("");
+      showSuccess("New IT Support Team created and active.");
       queryClient.invalidateQueries({ queryKey: ["support-teams"] });
     },
     onError: (err: unknown) => {
@@ -192,7 +254,11 @@ export const UserManagementPage: React.FC = () => {
   const openEditModal = (u: UserDetail) => {
     setEditUser(u);
     setEditName(u.full_name);
+    setEditEmail(u.email);
+    setEditPassword("");
+    setEditEmpId(u.employee_id || "");
     setEditTitle(u.job_title || "");
+    setEditPhone(u.phone || "");
     setEditRole(u.role);
     setEditDeptId(u.department_id ? String(u.department_id) : "");
     setEditTeamId(u.support_team_id ? String(u.support_team_id) : "");
@@ -209,7 +275,7 @@ export const UserManagementPage: React.FC = () => {
             User, Role & Support Team Administration
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Provision accounts, enforce RBAC permissions, and assign IT Support Teams.
+            Provision custom Employee, Agent, and Admin accounts stored directly in PostgreSQL.
           </p>
         </div>
 
@@ -234,6 +300,13 @@ export const UserManagementPage: React.FC = () => {
         </div>
       </div>
 
+      {successMsg && (
+        <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center gap-2.5 text-xs font-semibold text-emerald-800">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>{successMsg}</span>
+        </div>
+      )}
+
       {errorMsg && (
         <div className="p-4 rounded-xl bg-red-50 border border-red-200 flex items-center justify-between text-xs text-red-700">
           <div className="flex items-center gap-2">
@@ -246,38 +319,15 @@ export const UserManagementPage: React.FC = () => {
         </div>
       )}
 
-      {/* Support Teams Overview Pills */}
-      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs">
-        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">
-          Active IT Support Teams ({supportTeams?.length || 0})
-        </h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {supportTeams?.map((team) => (
-            <div
-              key={team.id}
-              className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between"
-            >
-              <div>
-                <p className="text-xs font-bold text-slate-900">{team.name}</p>
-                <p className="text-[11px] text-slate-500">{team.specialization || "IT Operations"}</p>
-              </div>
-              <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-mono text-[10px] font-bold border border-blue-200">
-                {team.code}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Filters Bar */}
-      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs grid grid-cols-1 md:grid-cols-4 gap-3">
+      {/* Filters Bar (Search + Role + Department + Support Team Dropdown) */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="md:col-span-2 relative">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search users by name, corporate email, employee ID, or title..."
+            placeholder="Search users by name, email, employee ID, phone, or title..."
             className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white"
           />
         </div>
@@ -307,6 +357,20 @@ export const UserManagementPage: React.FC = () => {
             </option>
           ))}
         </select>
+
+        <select
+          value={teamFilter}
+          onChange={(e) => setTeamFilter(e.target.value)}
+          aria-label="Filter by support team dropdown"
+          className="px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-700"
+        >
+          <option value="all">All Support Teams</option>
+          {supportTeams?.map((t) => (
+            <option key={t.id} value={String(t.id)}>
+              {t.name} ({t.code})
+            </option>
+          ))}
+        </select>
       </div>
 
       {/* Users Table */}
@@ -319,6 +383,7 @@ export const UserManagementPage: React.FC = () => {
                 <th className="py-3.5 px-4">Role</th>
                 <th className="py-3.5 px-4">Department</th>
                 <th className="py-3.5 px-4">Support Team</th>
+                <th className="py-3.5 px-4">Phone</th>
                 <th className="py-3.5 px-4">Status</th>
                 <th className="py-3.5 px-4">Last Login</th>
                 <th className="py-3.5 px-5 text-right">Actions</th>
@@ -326,13 +391,20 @@ export const UserManagementPage: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs">
               {isLoading ? (
-                [...Array(6)].map((_, i) => (
+                [...Array(3)].map((_, i) => (
                   <tr key={i} className="animate-pulse">
-                    <td colSpan={7} className="py-4 px-5">
+                    <td colSpan={8} className="py-4 px-5">
                       <div className="h-6 bg-slate-100 rounded" />
                     </td>
                   </tr>
                 ))
+              ) : (usersData?.items || []).length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-10 text-center text-slate-500">
+                    No users match the selected filters. Click{" "}
+                    <strong>Create User Account</strong> to add a new user to PostgreSQL.
+                  </td>
+                </tr>
               ) : (
                 usersData?.items.map((u) => (
                   <tr key={u.id} className="hover:bg-slate-50/80">
@@ -354,16 +426,19 @@ export const UserManagementPage: React.FC = () => {
                       <RoleBadge role={u.role} />
                     </td>
                     <td className="py-3.5 px-4 text-slate-700 font-medium">
-                      {u.department?.name || "—"}
+                      {u.role === "admin" ? "—" : u.department?.name || "—"}
                     </td>
                     <td className="py-3.5 px-4 text-slate-700">
-                      {u.support_team ? (
+                      {u.role !== "admin" && u.support_team ? (
                         <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
                           {u.support_team.name}
                         </span>
                       ) : (
                         <span className="text-slate-400">—</span>
                       )}
+                    </td>
+                    <td className="py-3.5 px-4 font-mono text-slate-600">
+                      {u.phone || <span className="text-slate-400">—</span>}
                     </td>
                     <td className="py-3.5 px-4">
                       {u.is_active ? (
@@ -381,24 +456,33 @@ export const UserManagementPage: React.FC = () => {
                     <td className="py-3.5 px-4 text-slate-500">
                       {formatDateTime(u.last_login_at)}
                     </td>
-                    <td className="py-3.5 px-5 text-right space-x-2 whitespace-nowrap">
+                    <td className="py-3.5 px-5 text-right space-x-1.5 whitespace-nowrap">
                       <button
                         onClick={() => openEditModal(u)}
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer"
                       >
                         <Edit3 className="w-3 h-3" />
-                        Edit / Role
+                        Edit
                       </button>
                       <button
                         onClick={() => toggleActiveMutation.mutate(u)}
-                        className={`px-2.5 py-1 rounded font-semibold cursor-pointer ${
+                        className={`px-2 py-1 rounded font-semibold cursor-pointer ${
                           u.is_active
-                            ? "text-red-600 hover:bg-red-50"
+                            ? "text-amber-700 hover:bg-amber-50"
                             : "text-emerald-600 hover:bg-emerald-50"
                         }`}
                       >
-                        {u.is_active ? "Deactivate" : "Activate"}
+                        {u.is_active ? "Disable" : "Enable"}
                       </button>
+                      {u.role !== "admin" && (
+                        <button
+                          onClick={() => deleteUserMutation.mutate(u.id)}
+                          title="Delete User"
+                          className="p-1.5 rounded text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 inline" />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -410,7 +494,7 @@ export const UserManagementPage: React.FC = () => {
 
       {/* Create User Modal */}
       {createModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-slate-900">Provision New Enterprise User</h3>
@@ -426,30 +510,68 @@ export const UserManagementPage: React.FC = () => {
                   type="text"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  placeholder="Jordan Taylor"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
+                  placeholder="Enter name"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white"
                 />
               </div>
-              <div className="sm:col-span-2">
-                <label className="block font-bold uppercase text-slate-700 mb-1">
-                  Corporate Email *
-                </label>
-                <input
-                  type="email"
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  placeholder="jordan.taylor@ticketdesk.enterprise"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
-                />
+              <div className="sm:col-span-2 p-3.5 rounded-xl bg-blue-50/50 border border-blue-200/80 space-y-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-blue-800">
+                  Login Credentials (Set by Administrator)
+                </p>
+                <div>
+                  <label className="flex items-center gap-1 font-bold uppercase text-slate-700 mb-1">
+                    <Mail className="w-3.5 h-3.5 text-blue-600" />
+                    Corporate Email ID *
+                  </label>
+                  <input
+                    type="email"
+                    value={newEmail}
+                    onChange={(e) => setNewEmail(e.target.value)}
+                    placeholder="Enter email ID"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+                <div>
+                  <label className="flex items-center justify-between font-bold uppercase text-slate-700 mb-1">
+                    <span className="inline-flex items-center gap-1">
+                      <KeyRound className="w-3.5 h-3.5 text-blue-600" />
+                      Set Login Password *
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword(!showNewPassword)}
+                      className="inline-flex items-center gap-1 text-[11px] text-blue-600 hover:underline normal-case font-semibold cursor-pointer"
+                    >
+                      {showNewPassword ? (
+                        <>
+                          <EyeOff className="w-3 h-3" /> Hide
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-3 h-3" /> Show
+                        </>
+                      )}
+                    </button>
+                  </label>
+                  <input
+                    type={showNewPassword ? "text" : "password"}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Enter password (minimum 4 characters)"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono focus:outline-none focus:border-blue-600"
+                  />
+                </div>
               </div>
               <div>
-                <label className="block font-bold uppercase text-slate-700 mb-1">
-                  Initial Password *
+                <label className="flex items-center gap-1 font-bold uppercase text-slate-700 mb-1">
+                  <Phone className="w-3 h-3 text-blue-600" />
+                  Phone Number
                 </label>
                 <input
-                  type="text"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
+                  type="tel"
+                  value={newPhone}
+                  onChange={(e) => setNewPhone(e.target.value)}
+                  placeholder="Enter mobile number"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
                 />
               </div>
@@ -459,15 +581,20 @@ export const UserManagementPage: React.FC = () => {
                   type="text"
                   value={newEmpId}
                   onChange={(e) => setNewEmpId(e.target.value)}
-                  placeholder="EMP-2050"
+                  placeholder="Enter employee ID"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
                 />
               </div>
               <div>
                 <label className="block font-bold uppercase text-slate-700 mb-1">Role *</label>
                 <select
+                  aria-label="New account role"
                   value={newRole}
-                  onChange={(e) => setNewRole(e.target.value as RoleType)}
+                  onChange={(e) => {
+                    const role = e.target.value as RoleType;
+                    setNewRole(role);
+                    setErrorMsg(null);
+                  }}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 >
                   <option value="employee">Employee</option>
@@ -481,13 +608,15 @@ export const UserManagementPage: React.FC = () => {
                   type="text"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="Systems Engineer"
+                  placeholder="Enter job title"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 />
               </div>
+              <>
               <div>
                 <label className="block font-bold uppercase text-slate-700 mb-1">Department</label>
                 <select
+                  aria-label="New account department"
                   value={newDeptId}
                   onChange={(e) => setNewDeptId(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
@@ -498,24 +627,41 @@ export const UserManagementPage: React.FC = () => {
                       {d.name}
                     </option>
                   ))}
+                  <option value="new">Create new department...</option>
                 </select>
+                {newDeptId === "new" && <input aria-label="New department name" value={newDepartmentName}
+                  onChange={e => setNewDepartmentName(e.target.value)} placeholder="Enter new department name"
+                  minLength={2} maxLength={120} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" />}
               </div>
-              <div>
-                <label className="block font-bold uppercase text-slate-700 mb-1">Support Team</label>
+              <div className="sm:col-span-2">
+                <label className="block font-bold uppercase text-slate-700 mb-1">
+                  Support Team (Active Teams)
+                </label>
                 <select
+                  aria-label="New account support team"
                   value={newTeamId}
                   onChange={(e) => setNewTeamId(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 >
-                  <option value="">None</option>
+                  <option value="">No support team</option>
                   {supportTeams?.map((t) => (
                     <option key={t.id} value={String(t.id)}>
-                      {t.name}
+                      {t.name} ({t.code})
                     </option>
                   ))}
+                  <option value="new">Create new support team...</option>
                 </select>
+                {newTeamId === "new" && <input aria-label="New support team name" value={newSupportTeamName}
+                  onChange={e => setNewSupportTeamName(e.target.value)} placeholder="Enter new support team name"
+                  minLength={2} maxLength={120} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" />}
+                <p className="mt-2 text-[11px] text-slate-500">
+                  IT Support Agents access the support dashboard. Administrators access the admin console.
+                  Both sign in with the email and password assigned here.
+                </p>
               </div>
+              </>
             </div>
+            {errorMsg && <p role="alert" className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{errorMsg}</p>}
 
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
               <button
@@ -526,7 +672,9 @@ export const UserManagementPage: React.FC = () => {
               </button>
               <button
                 onClick={() => createUserMutation.mutate()}
-                disabled={!newEmail || !newName || newPassword.length < 8 || createUserMutation.isPending}
+                disabled={!newEmail.trim() || newName.trim().length < 2 || newPassword.length < 4 || createUserMutation.isPending ||
+                  ((newDeptId === "new" && newDepartmentName.trim().length < 2) ||
+                    (newTeamId === "new" && newSupportTeamName.trim().length < 2))}
                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
               >
                 {createUserMutation.isPending ? "Creating..." : "Create Account"}
@@ -562,6 +710,36 @@ export const UserManagementPage: React.FC = () => {
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 />
               </div>
+              <div className="sm:col-span-2">
+                <label className="block font-bold uppercase text-slate-700 mb-1">
+                  Corporate Email ID
+                </label>
+                <input
+                  type="email"
+                  value={editEmail}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="flex items-center justify-between font-bold uppercase text-slate-700 mb-1">
+                  <span>Set New Password (Optional)</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowEditPassword(!showEditPassword)}
+                    className="text-[11px] text-blue-600 hover:underline normal-case font-semibold cursor-pointer"
+                  >
+                    {showEditPassword ? "Hide" : "Show"}
+                  </button>
+                </label>
+                <input
+                  type={showEditPassword ? "text" : "password"}
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                  placeholder="Leave blank to keep existing password, or enter new password..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
+                />
+              </div>
               <div>
                 <label className="block font-bold uppercase text-slate-700 mb-1">
                   Assigned Role
@@ -572,9 +750,18 @@ export const UserManagementPage: React.FC = () => {
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-semibold"
                 >
                   <option value="employee">Employee</option>
-                  <option value="agent">IT Support Agent</option>
+                  <option value="agent">IT Consultant (IT Support Agent)</option>
                   <option value="admin">Administrator</option>
                 </select>
+              </div>
+              <div>
+                <label className="block font-bold uppercase text-slate-700 mb-1">Employee ID</label>
+                <input
+                  type="text"
+                  value={editEmpId}
+                  onChange={(e) => setEditEmpId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
+                />
               </div>
               <div>
                 <label className="block font-bold uppercase text-slate-700 mb-1">Job Title</label>
@@ -585,6 +772,19 @@ export const UserManagementPage: React.FC = () => {
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 />
               </div>
+              <div>
+                <label className="block font-bold uppercase text-slate-700 mb-1">
+                  Phone Number
+                </label>
+                <input
+                  type="tel"
+                  value={editPhone}
+                  onChange={(e) => setEditPhone(e.target.value)}
+                  placeholder="Enter mobile number"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
+                />
+              </div>
+              {editRole !== "admin" && <>
               <div>
                 <label className="block font-bold uppercase text-slate-700 mb-1">Department</label>
                 <select
@@ -615,6 +815,7 @@ export const UserManagementPage: React.FC = () => {
                   ))}
                 </select>
               </div>
+              </>}
               <div className="sm:col-span-2 pt-1">
                 <label className="inline-flex items-center gap-2 font-semibold text-slate-700 cursor-pointer">
                   <input
@@ -664,7 +865,7 @@ export const UserManagementPage: React.FC = () => {
                   type="text"
                   value={teamName}
                   onChange={(e) => setTeamName(e.target.value)}
-                  placeholder="Cloud Platform Reliability"
+                  placeholder="Enter support team name"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 />
               </div>
@@ -674,7 +875,7 @@ export const UserManagementPage: React.FC = () => {
                   type="text"
                   value={teamCode}
                   onChange={(e) => setTeamCode(e.target.value.toUpperCase())}
-                  placeholder="SRE"
+                  placeholder="Enter team code"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
                 />
               </div>
@@ -686,7 +887,7 @@ export const UserManagementPage: React.FC = () => {
                   type="text"
                   value={teamSpec}
                   onChange={(e) => setTeamSpec(e.target.value)}
-                  placeholder="Kubernetes, Terraform & AWS Infrastructure"
+                  placeholder="Enter team specialization"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg"
                 />
               </div>

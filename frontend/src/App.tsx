@@ -15,6 +15,8 @@ import { UserManagementPage } from "./pages/UserManagementPage";
 import { SLAManagementPage } from "./pages/SLAManagementPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SLAAlertsPage } from "./pages/SLAAlertsPage";
+import { ProfilePage } from "./pages/ProfilePage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -55,11 +57,16 @@ export const App: React.FC = () => {
               <Route
                 path="tickets/assigned"
                 element={
-                  <ProtectedRoute allowedRoles={["agent", "admin"]}>
+                  <ProtectedRoute allowedRoles={["admin"]}>
                     <TicketsListPage mode="assigned" />
                   </ProtectedRoute>
                 }
               />
+              <Route path="sla-alerts" element={
+                <ProtectedRoute allowedRoles={["admin"]}>
+                  <SLAAlertsPage />
+                </ProtectedRoute>
+              } />
               <Route path="tickets/new" element={<CreateTicketPage />} />
               <Route path="tickets/:ticketId" element={<TicketDetailPage />} />
               <Route path="knowledge" element={<KnowledgeBasePage />} />
@@ -95,7 +102,15 @@ export const App: React.FC = () => {
                   </ProtectedRoute>
                 }
               />
-              <Route path="settings" element={<SettingsPage />} />
+              <Route path="profile" element={<ProfilePage />} />
+              <Route
+                path="settings"
+                element={
+                  <ProtectedRoute allowedRoles={["agent", "admin"]}>
+                    <SettingsPage />
+                  </ProtectedRoute>
+                }
+              />
             </Route>
 
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -51,13 +51,19 @@ def get_current_user(
             error_code="INVALID_TOKEN",
         )
 
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    try:
+        subject_id = int(user_id)
+    except (TypeError, ValueError):
+        raise AppException("Invalid token subject.", status.HTTP_401_UNAUTHORIZED, "INVALID_TOKEN")
+    user = db.query(User).filter(User.id == subject_id).first()
     if not user:
         raise AppException(
             message="Authenticated user account no longer exists.",
             status_code=status.HTTP_401_UNAUTHORIZED,
             error_code="USER_NOT_FOUND",
         )
+    if not user.session_identity or payload.get("sid") != user.session_identity or payload.get("role") != user.role:
+        raise AppException("The account or role changed. Please sign in explicitly.", status.HTTP_401_UNAUTHORIZED, "SESSION_IDENTITY_CHANGED")
     if not user.is_active:
         raise AppException(
             message="Your user account has been deactivated. Contact an administrator.",

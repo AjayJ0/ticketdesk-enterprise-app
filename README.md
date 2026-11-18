@@ -82,3 +82,10 @@ docker compose up --build -d
 - [Database Schema & ER Diagram](docs/database_schema.md)
 - [REST API Documentation](docs/api_documentation.md)
 - [Local & AWS Cloud Deployment Guide](docs/deployment_guide.md)
+
+
+## Current workflow and local data
+
+See [Workflow and session behavior](docs/workflow_and_sessions.md) for ticket acceptance, transfers, closed work segments, SLA monitoring, and account isolation. Apply all Alembic migrations before starting an existing database.
+
+Local databases, uploads, `.env` files, runtime caches, and generated account/login exports in `outputs/` are excluded from version control. Department accounts and ticket scenarios created in a local database are not part of this source repository. Configure a fresh environment using `.env.example`; development seed accounts listed above do not describe accounts in an existing local database.

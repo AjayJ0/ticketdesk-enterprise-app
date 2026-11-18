@@ -60,3 +60,7 @@ frontend/.env
 .DS_Store
 Thumbs.db
 *.log
+
+# Local runtime caches, generated reports and account credential exports
+.vite/
+outputs/

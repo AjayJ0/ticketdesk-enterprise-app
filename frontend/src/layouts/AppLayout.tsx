@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   BarChart3,
   Bell,
   BookOpen,
@@ -26,7 +27,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { apiRequest } from "../services/api";
-import { NotificationList, RoleType } from "../types";
+import { NotificationList, PaginatedTickets, RoleType } from "../types";
 import { cn, formatRelativeTime } from "../utils/format";
 import { RoleBadge } from "../components/ui/Badges";
 
@@ -54,6 +55,13 @@ const NAV_ITEMS: NavItem[] = [
     section: "workspace",
   },
   {
+    label: "SLA Alerts",
+    to: "/sla-alerts",
+    icon: AlertTriangle,
+    roles: ["admin"],
+    section: "workspace",
+  },
+  {
     label: "All Tickets",
     to: "/tickets",
     icon: Inbox,
@@ -64,7 +72,7 @@ const NAV_ITEMS: NavItem[] = [
     label: "Assigned to Me",
     to: "/tickets/assigned",
     icon: UserCheck,
-    roles: ["agent", "admin"],
+    roles: ["admin"],
     section: "workspace",
   },
   {
@@ -113,7 +121,7 @@ const NAV_ITEMS: NavItem[] = [
     label: "Settings",
     to: "/settings",
     icon: Settings,
-    roles: ["employee", "agent", "admin"],
+    roles: ["agent", "admin"],
     section: "admin",
   },
 ];
@@ -134,6 +142,14 @@ export const AppLayout: React.FC = () => {
     queryKey: ["notifications"],
     queryFn: () => apiRequest<NotificationList>("/notifications?limit=20"),
     refetchInterval: 20000,
+  });
+
+  const { data: slaAlerts } = useQuery<PaginatedTickets>({
+    queryKey: ["sla-alerts", user?.id, 1],
+    queryFn: () => apiRequest<PaginatedTickets>("/notifications/sla-alerts?page=1&page_size=20"),
+    enabled: user?.role === "admin",
+    refetchInterval: 20000,
+    staleTime: 0,
   });
 
   const markReadMutation = useMutation({
@@ -174,6 +190,7 @@ export const AppLayout: React.FC = () => {
 
   const getBreadcrumbLabel = () => {
     const path = location.pathname;
+    if (path === "/sla-alerts") return "SLA Alerts";
     if (path.startsWith("/dashboard")) return "Operational Dashboard";
     if (path === "/tickets/new") return "Create Support Ticket";
     if (path === "/tickets/my") return "My Support Tickets";
@@ -185,6 +202,7 @@ export const AppLayout: React.FC = () => {
     if (path.startsWith("/admin/users")) return "User & Role Administration";
     if (path.startsWith("/admin/sla")) return "Service Level Agreement Policies";
     if (path.startsWith("/admin/audit-logs")) return "Security & Compliance Audit Logs";
+    if (path.startsWith("/profile")) return "Corporate Employee Profile";
     if (path.startsWith("/settings")) return "Platform Settings & Preferences";
     return "Workspace";
   };
@@ -216,10 +234,16 @@ export const AppLayout: React.FC = () => {
                     collapsed && "justify-center px-2"
                   )
                 }
-                title={collapsed ? item.label : undefined}
+                title={collapsed ? `${item.label}${item.to === "/sla-alerts" ? ` (${slaAlerts?.total || 0} outstanding)` : ""}` : undefined}
               >
                 <Icon className="w-4 h-4 shrink-0" />
-                {!collapsed && <span className="truncate">{item.label}</span>}
+                {!collapsed && <span className="truncate">{item.label === "All Tickets" && user.role === "agent" ? "My Team Queue" : item.label}</span>}
+                {item.to === "/sla-alerts" && (slaAlerts?.total || 0) > 0 && (
+                  <span aria-label={`${slaAlerts?.total} outstanding SLA alerts`}
+                    className={cn("rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold text-white", !collapsed && "ml-auto")}>
+                    {slaAlerts!.total > 99 ? "99+" : slaAlerts!.total}
+                  </span>
+                )}
               </NavLink>
             );
           })}
@@ -274,14 +298,21 @@ export const AppLayout: React.FC = () => {
         <div className="p-3 border-t border-slate-800/80 bg-navy-950/50">
           {!collapsed ? (
             <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-white truncate">{user.full_name}</p>
+              <button
+                type="button"
+                onClick={() => navigate("/profile")}
+                className="min-w-0 text-left hover:opacity-90 transition-opacity cursor-pointer"
+                title="View Employee Profile"
+              >
+                <p className="text-xs font-semibold text-white truncate hover:text-blue-400 transition-colors">
+                  {user.full_name}
+                </p>
                 <p className="text-[11px] text-slate-400 truncate">
                   {user.role_info?.display_name || user.role.toUpperCase()}
                 </p>
-              </div>
+              </button>
               <button
-                onClick={() => logout()}
+                onClick={() => { void logout(); navigate("/login", { replace: true, state: null }); }}
                 className="p-2 rounded-md text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
                 title="Sign out"
               >
@@ -290,7 +321,7 @@ export const AppLayout: React.FC = () => {
             </div>
           ) : (
             <button
-              onClick={() => logout()}
+              onClick={() => { void logout(); navigate("/login", { replace: true, state: null }); }}
               className="w-full flex justify-center p-2 rounded-md text-slate-400 hover:text-red-400 hover:bg-slate-800"
               title="Sign out"
             >
@@ -496,20 +527,37 @@ export const AppLayout: React.FC = () => {
 
             <div className="hidden md:block h-6 w-px bg-slate-200 mx-1" />
 
-            {/* User Profile + Role Badge */}
-            <div className="hidden md:flex items-center gap-2.5">
-              <RoleBadge role={user.role} />
-              <div className="text-right">
-                <p className="text-xs font-semibold text-slate-800 leading-none">
-                  {user.full_name}
-                </p>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  {user.department?.name || "Enterprise IT"}
-                </p>
+            {/* User Profile + Role Badge (Click name/profile to open read-only Profile Page) */}
+            <div className="flex items-center gap-2">
+              <div className="hidden md:block">
+                <RoleBadge role={user.role} />
               </div>
               <button
-                onClick={() => logout()}
-                className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
+                type="button"
+                onClick={() => navigate("/profile")}
+                className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-slate-100 border border-transparent hover:border-slate-200 transition-all cursor-pointer group"
+                title="Click to view your Employee Profile"
+              >
+                <div className="w-7 h-7 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0 shadow-2xs">
+                  {user.full_name
+                    .split(" ")
+                    .map((n) => n[0])
+                    .join("")
+                    .slice(0, 2)
+                    .toUpperCase()}
+                </div>
+                <div className="text-left">
+                  <p className="text-xs font-semibold text-slate-800 group-hover:text-blue-600 leading-none transition-colors">
+                    {user.full_name}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5 hidden sm:block">
+                    {user.department?.name || "Enterprise IT"}
+                  </p>
+                </div>
+              </button>
+              <button
+                onClick={() => { void logout(); navigate("/login", { replace: true, state: null }); }}
+                className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
                 title="Logout"
               >
                 <LogOut className="w-4 h-4" />

@@ -8,7 +8,8 @@ export type TicketStatus =
   | "in_progress"
   | "pending"
   | "resolved"
-  | "closed";
+  | "closed"
+  | "transferred";
 
 export interface UserRoleInfo {
   id: number;
@@ -55,6 +56,7 @@ export interface UserSummary {
   role: RoleType;
   department_name?: string | null;
   support_team_name?: string | null;
+  support_team_id?: number | null;
 }
 
 export interface UserDetail extends AuthUser {
@@ -98,7 +100,7 @@ export interface SLAStatusInfo {
   resolution_breached: boolean;
   is_overdue: boolean;
   remaining_minutes?: number | null;
-  sla_health: "within_sla" | "at_risk" | "breached" | "met";
+  sla_health: "within_sla" | "at_risk" | "breached" | "met" | "closed";
 }
 
 export interface TicketListItem {
@@ -110,6 +112,11 @@ export interface TicketListItem {
   subcategory?: string | null;
   priority: TicketPriority;
   status: TicketStatus;
+  closed_at?: string | null;
+  transferred_at?: string | null;
+  transfer_outcome?: string | null;
+  routed_by?: UserSummary | null;
+  previous_ticket_number?: string | null;
   requester: UserSummary;
   assigned_agent?: UserSummary | null;
   department_name?: string | null;
@@ -117,7 +124,7 @@ export interface TicketListItem {
   affected_service?: string | null;
   resolution_due_at?: string | null;
   is_overdue: boolean;
-  sla_health: "within_sla" | "at_risk" | "breached" | "met";
+  sla_health: "within_sla" | "at_risk" | "breached" | "met" | "closed";
   comment_count: number;
   attachment_count: number;
   created_at: string;
@@ -170,6 +177,13 @@ export interface TicketDetail extends TicketListItem {
   comments: TicketCommentItem[];
   attachments: TicketAttachmentItem[];
   history: TicketHistoryItem[];
+  team_received_at?: string | null;
+  work_started_at?: string | null;
+  original_submitted_at?: string | null;
+  can_accept?: boolean;
+  can_manage?: boolean;
+  can_chat?: boolean;
+  lineage?: { id: number; ticket_number: string; status: TicketStatus; support_team_name?: string; relation: string; can_open: boolean }[];
 }
 
 export interface PaginatedTickets {
@@ -188,7 +202,9 @@ export interface DashboardSummary {
   pending_tickets: number;
   resolved_tickets: number;
   closed_tickets: number;
+  transferred_tickets?: number;
   overdue_tickets: number;
+  sla_alerts_today?: number;
   avg_resolution_hours: number;
   sla_compliance_percentage: number;
   my_assigned_count: number;

@@ -10,6 +10,8 @@ from app.middleware.rate_limit import get_client_ip
 from app.models.ticket import TicketAttachment, TicketCategory
 from app.models.user import User
 from app.schemas.ticket import (
+    TicketTransferRequest,
+    TicketLinkResponse,
     CategoryCreateRequest,
     CategoryResponse,
     PaginatedTicketsResponse,
@@ -37,6 +39,8 @@ from app.services.ticket_service import (
     upload_ticket_attachment_service,
 )
 from app.storage.provider import get_storage_provider
+from app.services.ticket_workflow import accept_ticket, transfer_ticket
+from app.services.ticket_access import can_read_ticket
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -48,6 +52,8 @@ def _serialize_category(cat: TicketCategory) -> CategoryResponse:
             subs = json.loads(cat.subcategories_json)
         except Exception:
             subs = []
+    if "Others" not in subs:
+        subs.append("Others")
     return CategoryResponse(
         id=cat.id,
         name=cat.name,
@@ -116,6 +122,7 @@ def list_tickets(
     status_filter: Optional[str] = Query(None, alias="status"),
     priority_filter: Optional[str] = Query(None, alias="priority"),
     category_id: Optional[int] = Query(None),
+    support_team_id: Optional[int] = Query(None),
     assigned_to_me: bool = Query(False),
     my_tickets: bool = Query(False),
     unassigned_only: bool = Query(False),
@@ -134,6 +141,7 @@ def list_tickets(
         status_filter=status_filter,
         priority_filter=priority_filter,
         category_id=category_id,
+        support_team_id=support_team_id,
         assigned_to_me=assigned_to_me,
         my_tickets=my_tickets,
         unassigned_only=unassigned_only,
@@ -206,6 +214,20 @@ def update_ticket_status(
         ip_address=get_client_ip(request),
     )
     return serialize_ticket_detail(updated, current_user)
+
+
+@router.post("/{ticket_id}/accept", response_model=TicketDetailResponse)
+def accept_ticket_endpoint(ticket_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ticket = get_ticket_by_id_or_number(db, ticket_id)
+    return serialize_ticket_detail(accept_ticket(db, ticket, current_user), current_user)
+
+
+@router.post("/{ticket_id}/transfer", response_model=TicketLinkResponse)
+def transfer_ticket_endpoint(ticket_id: str, payload: TicketTransferRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ticket = get_ticket_by_id_or_number(db, ticket_id)
+    successor = transfer_ticket(db, ticket, payload, current_user)
+    return TicketLinkResponse(id=successor.id, ticket_number=successor.ticket_number, status=successor.status,
+        support_team_name=successor.support_team_rel.name, relation="successor", can_open=can_read_ticket(successor, current_user))
 
 
 @router.patch("/{ticket_id}/assign", response_model=TicketDetailResponse)

@@ -20,11 +20,16 @@ import {
   ShieldAlert,
   TrendingUp,
 } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import { Link } from "react-router-dom";
 import { apiRequest, downloadAuthorizedBlob } from "../services/api";
 import { AgentPerformanceItem } from "../types";
 
 interface TicketsReportResponse {
   total_tickets: number;
+  distinct_requests: number;
+  transferred_count: number;
+  records: { id: number; ticket_number: string; subject: string; status: string; work_outcome?: string; team?: string }[];
   open_vs_closed: {
     active: number;
     resolved_or_closed: number;
@@ -52,6 +57,8 @@ interface SLAReportResponse {
 }
 
 export const ReportsPage: React.FC = () => {
+  const { user } = useAuth();
+  const personal = user?.role === "agent";
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [exporting, setExporting] = useState(false);
@@ -64,17 +71,17 @@ export const ReportsPage: React.FC = () => {
   };
 
   const { data: ticketsReport, isLoading: loadingTickets } = useQuery<TicketsReportResponse>({
-    queryKey: ["reports-tickets", startDate, endDate],
+    queryKey: ["reports-tickets", user?.id, startDate, endDate],
     queryFn: () => apiRequest<TicketsReportResponse>(`/reports/tickets?${buildDateQuery()}`),
   });
 
   const { data: slaReport, isLoading: loadingSLA } = useQuery<SLAReportResponse>({
-    queryKey: ["reports-sla", startDate, endDate],
+    queryKey: ["reports-sla", user?.id, startDate, endDate],
     queryFn: () => apiRequest<SLAReportResponse>(`/reports/sla?${buildDateQuery()}`),
   });
 
   const { data: agentsReport, isLoading: loadingAgents } = useQuery<AgentPerformanceItem[]>({
-    queryKey: ["reports-agents"],
+    queryKey: ["reports-agents", user?.id],
     queryFn: () => apiRequest<AgentPerformanceItem[]>("/reports/agents"),
   });
 
@@ -109,10 +116,10 @@ export const ReportsPage: React.FC = () => {
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            Enterprise Reports & SLA Analytics
+            {personal ? "My Work Reports & Analytics" : "Enterprise Reports & SLA Analytics"}
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Database-backed operational intelligence, SLA compliance metrics, and CSV audit exports.
+            {personal ? "Your individual work records and CSV export, including tickets you transferred. Team queue visibility does not grant access to other consultants’ reports." : "Organization-wide operational intelligence and CSV reports across all support teams."}
           </p>
         </div>
 
@@ -198,19 +205,16 @@ export const ReportsPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs">
-          <div className="flex items-center justify-between text-xs font-semibold uppercase text-slate-500">
-            <span>Average Resolution Time</span>
-            <Clock className="w-4 h-4 text-indigo-600" />
-          </div>
-          <p className="text-2xl font-bold text-slate-900 mt-2">
-            {slaReport.average_resolution_hours}h
-          </p>
-          <p className="text-[11px] text-slate-500 mt-1">
-            Calculated from actual resolved timestamps
-          </p>
-        </div>
+
       </div>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-5">
+        <h2 className="text-sm font-bold">{personal ? "My Ticket Work Records" : "Ticket Records"}</h2>
+        <p className="mt-1 text-xs text-slate-600">{ticketsReport.total_tickets} unique ticket records · {ticketsReport.distinct_requests} original employee requests · {ticketsReport.transferred_count} transferred records. A linked successor is a separate work record, not a resolved original ticket.</p>
+        <div className="mt-3 divide-y text-xs">{ticketsReport.records?.map(row => <div key={row.id} className="flex flex-wrap justify-between gap-2 py-2">
+          <Link to={`/tickets/${row.ticket_number}`} className="font-semibold text-blue-700">{row.ticket_number} — {row.subject}</Link><span>{personal ? row.work_outcome || row.status : row.status} · {row.team}</span>
+        </div>)}</div>
+      </section>
 
       {/* Charts: Ticket Volume by Date + Tickets by Category */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -279,7 +283,6 @@ export const ReportsPage: React.FC = () => {
                 <th className="py-3 px-5 text-center">Total Tickets</th>
                 <th className="py-3 px-5 text-center">Within SLA</th>
                 <th className="py-3 px-5 text-center">SLA Breached</th>
-                <th className="py-3 px-5 text-center">Avg Resolution Time</th>
                 <th className="py-3 px-5 text-right">Compliance Rate</th>
               </tr>
             </thead>
@@ -294,7 +297,6 @@ export const ReportsPage: React.FC = () => {
                   <td className="py-3.5 px-5 text-center text-red-600 font-semibold">
                     {row.breached}
                   </td>
-                  <td className="py-3.5 px-5 text-center font-mono">{row.avg_resolution_hours}h</td>
                   <td className="py-3.5 px-5 text-right font-bold text-slate-900">
                     {row.compliance_percentage}%
                   </td>
@@ -322,7 +324,6 @@ export const ReportsPage: React.FC = () => {
                 <th className="py-3 px-5 text-center">Assigned</th>
                 <th className="py-3 px-5 text-center">Resolved</th>
                 <th className="py-3 px-5 text-center">Pending</th>
-                <th className="py-3 px-5 text-center">Avg Resolution</th>
                 <th className="py-3 px-5 text-right">SLA Compliance</th>
               </tr>
             </thead>
@@ -341,7 +342,6 @@ export const ReportsPage: React.FC = () => {
                   <td className="py-3.5 px-5 text-center text-amber-700 font-semibold">
                     {ag.pending_workload}
                   </td>
-                  <td className="py-3.5 px-5 text-center font-mono">{ag.avg_resolution_hours}h</td>
                   <td className="py-3.5 px-5 text-right font-bold text-emerald-600">
                     {ag.sla_compliance_rate}%
                   </td>

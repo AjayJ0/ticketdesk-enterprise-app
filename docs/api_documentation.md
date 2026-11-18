@@ -63,3 +63,12 @@ Interactive OpenAPI / Swagger documentation is served directly by FastAPI when t
 | `GET / PATCH / POST` | `/api/v1/notifications` | Authenticated | Retrieve in-app notifications and mark single or all notifications as read. |
 | `GET` | `/api/v1/audit-logs` | Admin | Query append-only security and administrative audit logs. |
 | `GET / PUT` | `/api/v1/settings` | Authenticated / Admin | View or update global system configuration settings. |
+
+
+## SLA Alerts
+
+`GET /api/v1/notifications/sla-alerts?page=1&page_size=20` is restricted to administrators and returns the existing paginated ticket response, ordered by earliest resolution deadline. Outstanding alerts are unresolved/unclosed tickets whose stored resolution deadline has passed. Administrators see all teams. Agents and employees cannot access this endpoint or receive SLA breach notifications; ordinary ticket notifications remain available. Response-only breaches are not resolution alerts.
+
+The sidebar and alerts page poll every 20 seconds while the application is open. Reading alerts or existing notifications synchronizes resolution-breach notifications into the existing notification inbox. A database-enforced recipient/ticket ledger prevents repeat delivery, including concurrent polling and reopening the same ticket. Read status does not dismiss an outstanding breach; resolution, closure, deadline extension, or leaving the recipient's responsibility removes it from the active alerts and inbox view. Stored notification history is retained. There is no background scheduler, SMS, or email delivery.
+
+Existing managed databases should apply Alembic revision `0002_sla_alert_deliveries`. Local development's existing startup table initialization creates the new ledger table automatically.

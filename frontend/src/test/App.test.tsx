@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import { AuthProvider } from "../contexts/AuthContext";
 import { LoginPage } from "../pages/LoginPage";
@@ -31,20 +32,22 @@ describe("TicketDesk Enterprise UI Components & Utilities", () => {
     expect(formatStatusLabel("in_progress")).toBe("In Progress");
   });
 
-  it("renders the LoginPage with demo role accounts and form inputs", () => {
+  it("renders the LoginPage with password recovery and no administrator account shortcut", () => {
     render(
-      <BrowserRouter>
-        <AuthProvider>
-          <LoginPage />
-        </AuthProvider>
-      </BrowserRouter>
+      <QueryClientProvider client={new QueryClient()}>
+        <BrowserRouter>
+          <AuthProvider>
+            <LoginPage />
+          </AuthProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
     );
 
     expect(screen.getByText("Sign in to your workspace")).toBeInTheDocument();
     expect(screen.getByLabelText("Corporate Email")).toBeInTheDocument();
     expect(screen.getByLabelText("Password")).toBeInTheDocument();
-    expect(screen.getByText("admin@ticketdesk.enterprise")).toBeInTheDocument();
-    expect(screen.getByText("alex.rivera@ticketdesk.enterprise")).toBeInTheDocument();
-    expect(screen.getByText("sarah.chen@ticketdesk.enterprise")).toBeInTheDocument();
+    expect(screen.getByText("Forgot password?")).toBeInTheDocument();
+    expect(screen.queryByText("admin@ticketdesk.enterprise")).not.toBeInTheDocument();
+    expect(screen.queryByText("Primary Administrator Account")).not.toBeInTheDocument();
   });
 });

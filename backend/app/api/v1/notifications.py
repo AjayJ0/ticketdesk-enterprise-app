@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_admin
 from app.core.exceptions import AppException
 from app.models.system import Notification
+from app.models.ticket import Ticket
 from app.models.user import User
+from app.services.sla_alert_service import outstanding_sla_tickets, sync_sla_notifications, visible_notifications
+from app.services.ticket_service import serialize_ticket_list_item
+from app.schemas.ticket import PaginatedTicketsResponse
 from app.schemas.system import NotificationListResponse, NotificationResponse
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
@@ -34,23 +37,37 @@ def list_my_notifications(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> NotificationListResponse:
-    q = db.query(Notification).filter(Notification.user_id == current_user.id)
+    sync_sla_notifications(db, current_user)
+    q = visible_notifications(db, current_user)
     if unread_only:
         q = q.filter(Notification.is_read == False)  # noqa: E712
 
     total = q.count()
-    unread_count = (
-        db.query(func.count(Notification.id))
-        .filter(Notification.user_id == current_user.id, Notification.is_read == False)  # noqa: E712
-        .scalar()
-        or 0
-    )
+    unread_count = visible_notifications(db, current_user).filter(Notification.is_read == False).count()
     items = q.order_by(Notification.created_at.desc()).limit(limit).all()
 
     return NotificationListResponse(
         items=[_serialize_notification(n) for n in items],
         unread_count=unread_count,
         total=total,
+    )
+
+
+@router.get("/sla-alerts", response_model=PaginatedTicketsResponse)
+def list_sla_alerts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> PaginatedTicketsResponse:
+    sync_sla_notifications(db, current_user)
+    query = outstanding_sla_tickets(db, current_user)
+    total = query.count()
+    tickets = query.order_by(Ticket.resolution_due_at.asc(), Ticket.id.asc()).offset((page - 1) * page_size).limit(page_size).all()
+    return PaginatedTicketsResponse(
+        items=[serialize_ticket_list_item(ticket, current_user) for ticket in tickets],
+        total=total, page=page, page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
     )
 
 
@@ -61,8 +78,8 @@ def mark_notification_read(
     current_user: User = Depends(get_current_user),
 ) -> NotificationResponse:
     notif = (
-        db.query(Notification)
-        .filter(Notification.id == notification_id, Notification.user_id == current_user.id)
+        visible_notifications(db, current_user)
+        .filter(Notification.id == notification_id)
         .first()
     )
     if not notif:

@@ -2,8 +2,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 from app.models.organization import Role
-from app.models.ticket import Ticket, TicketCategory
+from app.models.ticket import Ticket, TicketCategory, TicketTransferLink, TicketWorkRecord
+from app.services.ticket_access import scoped_ticket_query, personal_ticket_condition
 from app.models.user import User
+from app.models.system import SLAAlertDelivery
+from app.services.sla_alert_service import sync_sla_notifications, outstanding_sla_tickets
 from app.schemas.dashboard import (
     AgentPerformanceItem,
     DashboardDistributionResponse,
@@ -17,13 +20,76 @@ from app.services.ticket_service import serialize_ticket_list_item
 
 
 def _scoped_tickets_query(db: Session, current_user: User):
-    q = db.query(Ticket)
-    if current_user.role == "employee":
-        q = q.filter(Ticket.requester_id == current_user.id)
-    return q
+    return scoped_ticket_query(db, current_user)
+
+
+def request_roots(db, tickets):
+    parents = {link.successor_ticket_id: link.parent_ticket_id for link in db.query(TicketTransferLink).all()}
+    roots = set()
+    for ticket in tickets:
+        root, seen = ticket.id, set()
+        while root in parents and root not in seen:
+            seen.add(root)
+            root = parents[root]
+        roots.add(root)
+    return roots
+
+
+def latest_request_tickets(db, tickets):
+    successors = {row.parent_ticket_id: row.successor_ticket_id for row in db.query(TicketTransferLink).all()}
+    latest = {}
+    for ticket in tickets:
+        current, seen = ticket.id, set()
+        while current in successors and current not in seen:
+            seen.add(current)
+            current = successors[current]
+        latest[current] = db.get(Ticket, current)
+    return list(latest.values())
+
+
+def work_outcome(ticket, user, records):
+    record = records.get((ticket.id, user.id)) if user else None
+    if record and record.ended_at and record.outcome:
+        return record.outcome
+    return "transferred" if ticket.transferred_at else ticket.status
+
+
+def personal_resolution_hours(ticket, user, records):
+    outcome = work_outcome(ticket, user, records)
+    if outcome not in ("resolved", "closed"):
+        return None
+    record = records.get((ticket.id, user.id)) if user else None
+    start = ensure_utc((record.started_at or record.accepted_at) if record else ticket.created_at)
+    end = ensure_utc(record.ended_at if record else ticket.resolved_at)
+    return max(0, (end - start).total_seconds() / 3600) if start and end else None
+
+
+def personal_sla_breached(ticket, user, records, now):
+    record = records.get((ticket.id, user.id)) if user else None
+    if record and record.ended_at:
+        due = ensure_utc(ticket.resolution_due_at)
+        return bool(due and ensure_utc(record.ended_at) > due)
+    return evaluate_ticket_sla(ticket, now=now).resolution_breached
+
+
+def sla_alerts_today(db, now):
+    # Count original requests once across recipients and handoffs; cleared alerts remain recorded.
+    parents = {row.successor_ticket_id: row.parent_ticket_id for row in db.query(TicketTransferLink).all()}
+    first = {}
+    for delivery in db.query(SLAAlertDelivery).all():
+        root, seen = delivery.ticket_id, set()
+        while root in parents and root not in seen:
+            seen.add(root); root = parents[root]
+        recorded = ensure_utc(delivery.created_at)
+        if root not in first or recorded < first[root]: first[root] = recorded
+    local_zone = timezone(timedelta(hours=5, minutes=30))
+    day = now.astimezone(local_zone).date()
+    return sum(recorded.astimezone(local_zone).date() == day for recorded in first.values())
 
 
 def get_dashboard_summary_service(db: Session, current_user: User) -> DashboardSummaryResponse:
+    if current_user.role == "admin":
+        sync_sla_notifications(db, current_user)
     tickets: List[Ticket] = _scoped_tickets_query(db, current_user).all()
     now = datetime.now(timezone.utc)
 
@@ -33,7 +99,7 @@ def get_dashboard_summary_service(db: Session, current_user: User) -> DashboardS
     in_progress_c = sum(1 for t in tickets if t.status == "in_progress")
     pending_c = sum(1 for t in tickets if t.status == "pending")
     resolved_c = sum(1 for t in tickets if t.status == "resolved")
-    closed_c = sum(1 for t in tickets if t.status == "closed")
+    closed_c = sum(1 for t in tickets if t.status == "closed" or t.transferred_at)
 
     overdue_c = 0
     sla_compliant_c = 0
@@ -60,10 +126,10 @@ def get_dashboard_summary_service(db: Session, current_user: User) -> DashboardS
     sla_compliance_pct = round((sla_compliant_c / total) * 100.0, 1) if total > 0 else 100.0
 
     my_assigned = sum(
-        1 for t in tickets if t.assigned_agent_id == current_user.id and t.status not in ("resolved", "closed")
+        1 for t in tickets if t.assigned_agent_id == current_user.id and t.status not in ("resolved", "closed", "transferred")
     )
     unassigned_queue = sum(
-        1 for t in tickets if t.assigned_agent_id is None and t.status not in ("resolved", "closed")
+        1 for t in tickets if t.assigned_agent_id is None and t.status not in ("resolved", "closed", "transferred")
     )
 
     return DashboardSummaryResponse(
@@ -74,7 +140,9 @@ def get_dashboard_summary_service(db: Session, current_user: User) -> DashboardS
         pending_tickets=pending_c,
         resolved_tickets=resolved_c,
         closed_tickets=closed_c,
-        overdue_tickets=overdue_c,
+        transferred_tickets=sum(t.transferred_at is not None for t in tickets),
+        overdue_tickets=outstanding_sla_tickets(db, current_user).count() if current_user.role == "admin" else overdue_c,
+        sla_alerts_today=sla_alerts_today(db, now) if current_user.role == "admin" else 0,
         avg_resolution_hours=avg_res_hours,
         sla_compliance_percentage=sla_compliance_pct,
         my_assigned_count=my_assigned,
@@ -183,10 +251,16 @@ def get_dashboard_distribution_service(db: Session, current_user: User) -> Dashb
         ("pending", "Pending"),
         ("resolved", "Resolved"),
         ("closed", "Closed"),
+        ("transferred", "Transferred"),
     ]
     by_status = []
     for key, label in status_labels:
-        val = sum(1 for t in tickets if t.status == key)
+        # A transferred segment is closed operationally, but belongs in the
+        # transfer slice so each record appears exactly once in this chart.
+        val = sum(
+            1 for t in tickets
+            if ("transferred" if t.transferred_at else t.status) == key
+        )
         by_status.append(
             DistributionItem(
                 name=label,
@@ -233,7 +307,7 @@ def get_dashboard_distribution_service(db: Session, current_user: User) -> Dashb
     recent_tickets = [serialize_ticket_list_item(t, current_user) for t in tickets[:8]]
 
     # Agent performance (all active agents + admins handling tickets)
-    agent_performance = get_agent_performance_list(db)
+    agent_performance = get_agent_performance_list(db) if current_user.role == "admin" else []
 
     return DashboardDistributionResponse(
         by_status=by_status,
@@ -244,7 +318,7 @@ def get_dashboard_distribution_service(db: Session, current_user: User) -> Dashb
     )
 
 
-def get_agent_performance_list(db: Session) -> List[AgentPerformanceItem]:
+def get_agent_performance_list(db: Session, current_user: User | None = None) -> List[AgentPerformanceItem]:
     agents = (
         db.query(User)
         .join(Role, User.role_id == Role.id)
@@ -252,29 +326,29 @@ def get_agent_performance_list(db: Session) -> List[AgentPerformanceItem]:
         .order_by(User.id.asc())
         .all()
     )
+    if current_user and current_user.role != "admin":
+        agents = [agent for agent in agents if agent.id == current_user.id]
     all_tickets = db.query(Ticket).all()
+    work = {(row.ticket_id, row.user_id): row for row in db.query(TicketWorkRecord).all()}
     now = datetime.now(timezone.utc)
 
     items: List[AgentPerformanceItem] = []
     for agent in agents:
-        agent_tickets = [t for t in all_tickets if t.assigned_agent_id == agent.id]
+        agent_tickets = [t for t in all_tickets if t.assigned_agent_id == agent.id or (t.id, agent.id) in work]
         if not agent_tickets and agent.role == "admin":
             continue
         assigned_total = len(agent_tickets)
-        resolved_count = sum(1 for t in agent_tickets if t.status in ("resolved", "closed"))
-        pending_workload = sum(1 for t in agent_tickets if t.status not in ("resolved", "closed"))
+        resolved_count = sum(1 for t in agent_tickets if work_outcome(t, agent, work) in ("resolved", "closed"))
+        pending_workload = sum(1 for t in agent_tickets if t.assigned_agent_id == agent.id and t.status not in ("resolved", "closed", "transferred"))
 
         compliant = 0
         res_hours: List[float] = []
         for t in agent_tickets:
-            sla = evaluate_ticket_sla(t, now=now)
-            if not sla.resolution_breached:
+            if not personal_sla_breached(t, agent, work, now):
                 compliant += 1
-            if t.resolved_at and t.created_at:
-                s_dt = ensure_utc(t.created_at)
-                e_dt = ensure_utc(t.resolved_at)
-                if s_dt and e_dt and e_dt >= s_dt:
-                    res_hours.append((e_dt - s_dt).total_seconds() / 3600.0)
+            hours = personal_resolution_hours(t, agent, work)
+            if hours is not None:
+                res_hours.append(hours)
 
         sla_rate = round((compliant / assigned_total) * 100.0, 1) if assigned_total > 0 else 100.0
         avg_hrs = round(sum(res_hours) / len(res_hours), 2) if res_hours else 0.0
@@ -299,8 +373,9 @@ def filter_tickets_by_date_range(
     db: Session,
     start_date: str | None = None,
     end_date: str | None = None,
+    current_user: User | None = None,
 ) -> List[Ticket]:
-    q = db.query(Ticket)
+    q = scoped_ticket_query(db, current_user, personal=True) if current_user else db.query(Ticket)
     if start_date:
         try:
             start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
@@ -320,11 +395,15 @@ def generate_tickets_report_data(
     db: Session,
     start_date: str | None = None,
     end_date: str | None = None,
+    current_user: User | None = None,
 ) -> Dict[str, Any]:
-    tickets = filter_tickets_by_date_range(db, start_date, end_date)
+    tickets = filter_tickets_by_date_range(db, start_date, end_date, current_user)
+    records = {(row.ticket_id, row.user_id): row for row in db.query(TicketWorkRecord).all()}
+    actor = current_user if current_user and current_user.role == "agent" else None
     total = len(tickets)
-    resolved_or_closed = sum(1 for t in tickets if t.status in ("resolved", "closed"))
-    open_or_active = total - resolved_or_closed
+    resolved_or_closed = sum(work_outcome(t, actor, records) in ("resolved", "closed") for t in tickets)
+    transferred_count = sum(work_outcome(t, actor, records) == "transferred" for t in tickets)
+    open_or_active = sum(work_outcome(t, actor, records) in ("open", "assigned", "in_progress", "pending") for t in tickets)
     resolution_rate = round((resolved_or_closed / total) * 100.0, 1) if total > 0 else 0.0
 
     # Volume by date
@@ -359,6 +438,11 @@ def generate_tickets_report_data(
 
     return {
         "total_tickets": total,
+        "distinct_requests": len(request_roots(db, tickets)),
+        "transferred_count": transferred_count,
+        "scope": "personal" if current_user and current_user.role == "agent" else "organization",
+        "records": [{"id": t.id, "ticket_number": t.ticket_number, "subject": t.subject, "status": t.status, "work_outcome": work_outcome(t, actor, records),
+            "team": t.support_team_rel.name if t.support_team_rel else None} for t in tickets],
         "open_vs_closed": {
             "active": open_or_active,
             "resolved_or_closed": resolved_or_closed,
@@ -374,8 +458,14 @@ def generate_sla_report_data(
     db: Session,
     start_date: str | None = None,
     end_date: str | None = None,
+    current_user: User | None = None,
 ) -> Dict[str, Any]:
-    tickets = filter_tickets_by_date_range(db, start_date, end_date)
+    tickets = filter_tickets_by_date_range(db, start_date, end_date, current_user)
+    if current_user and current_user.role == "admin":
+        # Organization SLA is end-to-end per original request, not counted again at every handoff.
+        tickets = latest_request_tickets(db, tickets)
+    records = {(row.ticket_id, row.user_id): row for row in db.query(TicketWorkRecord).all()}
+    actor = current_user if current_user and current_user.role == "agent" else None
     now = datetime.now(timezone.utc)
 
     priority_breakdown = []
@@ -391,21 +481,16 @@ def generate_sla_report_data(
         p_hours: List[float] = []
 
         for t in p_tickets:
-            sla = evaluate_ticket_sla(t, now=now)
-            if sla.resolution_breached:
+            if personal_sla_breached(t, actor, records, now):
                 p_breached += 1
                 total_breached += 1
             else:
                 p_compliant += 1
                 total_compliant += 1
-
-            if t.resolved_at and t.created_at:
-                s_dt = ensure_utc(t.created_at)
-                e_dt = ensure_utc(t.resolved_at)
-                if s_dt and e_dt and e_dt >= s_dt:
-                    hrs = (e_dt - s_dt).total_seconds() / 3600.0
-                    p_hours.append(hrs)
-                    res_hours_all.append(hrs)
+            hours = personal_resolution_hours(t, actor, records)
+            if hours is not None:
+                p_hours.append(hours)
+                res_hours_all.append(hours)
 
         priority_breakdown.append(
             {

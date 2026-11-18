@@ -55,6 +55,7 @@ class TicketCreateRequest(BaseModel):
     subcategory: Optional[str] = Field(None, max_length=120)
     priority: str = Field("medium", pattern="^(critical|high|medium|low)$")
     department_id: Optional[int] = None
+    support_team_id: Optional[int] = None
     affected_service: Optional[str] = Field(None, max_length=150)
 
 
@@ -151,6 +152,11 @@ class TicketListItemResponse(BaseModel):
     subcategory: Optional[str] = None
     priority: str
     status: str
+    closed_at: Optional[datetime] = None
+    transferred_at: Optional[datetime] = None
+    transfer_outcome: Optional[str] = None
+    routed_by: Optional[UserSummary] = None
+    previous_ticket_number: Optional[str] = None
     requester: UserSummary
     assigned_agent: Optional[UserSummary] = None
     department_name: Optional[str] = None
@@ -165,11 +171,35 @@ class TicketListItemResponse(BaseModel):
     updated_at: datetime
 
 
+class TicketLinkResponse(BaseModel):
+    id: int
+    ticket_number: str
+    status: str
+    support_team_name: Optional[str] = None
+    relation: str
+    can_open: bool = True
+
+
+class TicketTransferRequest(BaseModel):
+    support_team_id: Optional[int] = Field(None, gt=0)
+    escalate_to_admin: bool = False
+    reject_assignment: bool = False
+    assigned_agent_id: Optional[int] = Field(None, gt=0)
+    reason: str = Field(..., min_length=5, max_length=2000)
+
+
 class TicketDetailResponse(TicketListItemResponse):
     description: str
     department_id: Optional[int] = None
     support_team_id: Optional[int] = None
     reopened_count: int = 0
+    team_received_at: Optional[datetime] = None
+    work_started_at: Optional[datetime] = None
+    original_submitted_at: Optional[datetime] = None
+    can_accept: bool = False
+    can_manage: bool = False
+    can_chat: bool = False
+    lineage: List[TicketLinkResponse] = []
     sla: SLAStatusInfo
     comments: List[TicketCommentResponse] = []
     attachments: List[TicketAttachmentResponse] = []

@@ -7,16 +7,22 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   ArrowLeft,
-  CheckCircle2,
+  Building2,
   Clock,
   FileUp,
-  Info,
   Send,
+  Users,
   X,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { ApiError, apiRequest } from "../services/api";
-import { CategoryItem, DepartmentInfo, SLAPolicyItem, TicketDetail } from "../types";
+import {
+  CategoryItem,
+  DepartmentInfo,
+  SLAPolicyItem,
+  SupportTeamInfo,
+  TicketDetail,
+} from "../types";
 import { formatFileSize } from "../utils/format";
 
 const createTicketSchema = z.object({
@@ -26,8 +32,10 @@ const createTicketSchema = z.object({
     .max(255, "Subject cannot exceed 255 characters"),
   category_id: z.coerce.number().min(1, "Please select an IT category"),
   subcategory: z.string().optional(),
+  custom_subcategory: z.string().max(120).optional(),
   priority: z.enum(["critical", "high", "medium", "low"]),
   department_id: z.coerce.number().optional(),
+  support_team_id: z.coerce.number().min(1, "Please select the responsible support team"),
   affected_service: z.string().max(150).optional(),
   description: z
     .string()
@@ -47,11 +55,22 @@ export const CreateTicketPage: React.FC = () => {
   const { data: categories } = useQuery<CategoryItem[]>({
     queryKey: ["ticket-categories"],
     queryFn: () => apiRequest<CategoryItem[]>("/tickets/categories"),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const { data: departments } = useQuery<DepartmentInfo[]>({
     queryKey: ["departments"],
     queryFn: () => apiRequest<DepartmentInfo[]>("/users/departments"),
+    staleTime: 0,
+    refetchOnMount: "always",
+  });
+
+  const { data: supportTeams } = useQuery<SupportTeamInfo[]>({
+    queryKey: ["support-teams"],
+    queryFn: () => apiRequest<SupportTeamInfo[]>("/users/support-teams"),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const { data: slaPolicies } = useQuery<SLAPolicyItem[]>({
@@ -63,6 +82,7 @@ export const CreateTicketPage: React.FC = () => {
     register,
     handleSubmit,
     watch,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<CreateTicketFormValues>({
     resolver: zodResolver(createTicketSchema),
@@ -70,18 +90,34 @@ export const CreateTicketPage: React.FC = () => {
       subject: "",
       category_id: 0,
       subcategory: "",
+      custom_subcategory: "",
       priority: "medium",
       department_id: user?.department?.id || undefined,
+      support_team_id: undefined,
       affected_service: "",
       description: "",
     },
   });
 
   const watchedCategoryId = Number(watch("category_id"));
+  const watchedSubcategory = watch("subcategory");
   const watchedPriority = watch("priority");
 
   const activeCategory = categories?.find((c) => c.id === watchedCategoryId);
   const activeSLA = slaPolicies?.find((p) => p.priority === watchedPriority);
+
+  // Guarantee "Others" is always present in subcategory options
+  const subcategoryOptions: string[] = React.useMemo(() => {
+    if (!activeCategory) return ["Others"];
+    const base = [...(activeCategory.subcategories || [])];
+    if (!base.some((s) => s.toLowerCase() === "others" || s.toLowerCase() === "other")) {
+      base.push("Others");
+    }
+    return base;
+  }, [activeCategory]);
+
+  // Filter Knowledge Base articles matching the selected category (or top articles if none selected)
+
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -91,15 +127,21 @@ export const CreateTicketPage: React.FC = () => {
 
   const onSubmit = async (values: CreateTicketFormValues) => {
     setSubmitError(null);
+    const resolvedSubcategory =
+      values.subcategory === "Others" && values.custom_subcategory?.trim()
+        ? `Others (${values.custom_subcategory.trim()})`
+        : values.subcategory || null;
+
     try {
       const created = await apiRequest<TicketDetail>("/tickets", {
         method: "POST",
         body: JSON.stringify({
           subject: values.subject,
           category_id: Number(values.category_id),
-          subcategory: values.subcategory || null,
+          subcategory: resolvedSubcategory,
           priority: values.priority,
           department_id: values.department_id ? Number(values.department_id) : null,
+          support_team_id: values.support_team_id ? Number(values.support_team_id) : null,
           affected_service: values.affected_service || null,
           description: values.description,
         }),
@@ -127,7 +169,7 @@ export const CreateTicketPage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-5xl mx-auto space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -143,7 +185,7 @@ export const CreateTicketPage: React.FC = () => {
             Submit New IT Support Ticket
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Provide technical details so our engineering support teams can triage and resolve your issue rapidly.
+            Provide technical details and select a target support team so our engineers can resolve your request rapidly.
           </p>
         </div>
       </div>
@@ -158,6 +200,7 @@ export const CreateTicketPage: React.FC = () => {
       <form onSubmit={handleSubmit(onSubmit)} className="grid grid-cols-1 lg:grid-cols-3 gap-6" noValidate>
         {/* Main Form Panel */}
         <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-5">
+          {/* Subject */}
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
               Ticket Subject *
@@ -166,20 +209,23 @@ export const CreateTicketPage: React.FC = () => {
               type="text"
               placeholder="e.g., GlobalProtect VPN failing TLS handshake on macOS 15.1"
               {...register("subject")}
-              className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600 focus:bg-white"
+              className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600 focus:bg-white transition-all"
             />
             {errors.subject && (
               <p className="mt-1 text-xs text-red-600">{errors.subject.message}</p>
             )}
           </div>
 
+          {/* Category & Subcategory (with "Others" option) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
                 Category *
               </label>
               <select
-                {...register("category_id")}
+                {...register("category_id", {
+                  onChange: () => setValue("subcategory", ""),
+                })}
                 className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white"
               >
                 <option value={0}>Select Category...</option>
@@ -204,7 +250,7 @@ export const CreateTicketPage: React.FC = () => {
                 className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white disabled:opacity-50"
               >
                 <option value="">Select Subcategory...</option>
-                {activeCategory?.subcategories.map((sub) => (
+                {subcategoryOptions.map((sub) => (
                   <option key={sub} value={sub}>
                     {sub}
                   </option>
@@ -213,6 +259,22 @@ export const CreateTicketPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Optional Custom Specification when "Others" Subcategory is chosen */}
+          {watchedSubcategory === "Others" && (
+            <div className="p-3.5 rounded-lg bg-blue-50/50 border border-blue-200/80 space-y-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-blue-800">
+                Specify "Others" Subcategory Detail (Optional)
+              </label>
+              <input
+                type="text"
+                placeholder="Briefly specify the hardware, software, or service subcategory..."
+                {...register("custom_subcategory")}
+                className="w-full px-3 py-2 text-xs bg-white border border-blue-200 rounded-lg focus:outline-none focus:border-blue-600"
+              />
+            </div>
+          )}
+
+          {/* Priority & Affected Service */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
@@ -242,23 +304,54 @@ export const CreateTicketPage: React.FC = () => {
             </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Department
-            </label>
-            <select
-              {...register("department_id")}
-              className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white"
-            >
-              <option value="">Default ({user?.department?.name || "Corporate"})</option>
-              {departments?.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({d.code})
-                </option>
-              ))}
-            </select>
+          {/* Department AND Support Team Dropdown (Synced live from Admin Support Teams) */}
+          <div className="space-y-4 pt-1 border-t border-slate-100">
+            <div>
+              <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                <Building2 className="w-3.5 h-3.5 text-blue-600" />
+                Department
+              </label>
+              <select
+                {...register("department_id")}
+                className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white"
+              >
+                <option value="">Default ({user?.department?.name || "Corporate"})</option>
+                {departments?.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name} ({d.code})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                <span className="inline-flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-blue-600" />
+                  Support Team
+                </span>
+                <span className="text-[10px] font-medium text-slate-400 normal-case">
+                  Synced with Admin Support Teams
+                </span>
+              </label>
+              <select
+                {...register("support_team_id")}
+                aria-label="Support Team"
+                className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white"
+              >
+                <option value="">Auto-Route / General IT Triage</option>
+                {supportTeams?.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name} ({team.code})
+                    {team.specialization ? ` — ${team.specialization}` : ""}
+                  </option>
+                ))}
+              </select>
+              {errors.support_team_id && <p className="mt-1 text-xs text-red-600">{errors.support_team_id.message}</p>}
+            </div>
           </div>
 
+          {/* Detailed Technical Description */}
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
               Detailed Technical Description *
@@ -331,12 +424,21 @@ export const CreateTicketPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Info Sidebar: Requester & Live SLA Preview */}
+        {/* Requester and Live SLA Preview */}
         <div className="space-y-4">
           <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs space-y-3">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-              Requester Identity
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Requester Identity
+              </h3>
+              <button
+                type="button"
+                onClick={() => navigate("/profile")}
+                className="text-[11px] font-semibold text-blue-600 hover:underline cursor-pointer"
+              >
+                View Profile
+              </button>
+            </div>
             <div className="text-xs space-y-1.5">
               <div className="flex justify-between">
                 <span className="text-slate-500">Name:</span>
@@ -392,25 +494,10 @@ export const CreateTicketPage: React.FC = () => {
             </div>
           )}
 
-          <div className="bg-blue-50/70 rounded-xl border border-blue-200/80 p-4 text-xs text-slate-700 space-y-2">
-            <div className="flex items-center gap-1.5 font-bold text-blue-800">
-              <Info className="w-4 h-4 text-blue-600" />
-              <span>Before You Submit</span>
-            </div>
-            <p className="text-[11px] text-slate-600 leading-relaxed">
-              Need an immediate password reset or VPN configuration guide? Check our{" "}
-              <button
-                type="button"
-                onClick={() => navigate("/knowledge")}
-                className="text-blue-600 font-semibold underline cursor-pointer"
-              >
-                Enterprise Knowledge Base
-              </button>{" "}
-              for instant self-service solutions.
-            </p>
-          </div>
         </div>
       </form>
+
+
     </div>
   );
 };

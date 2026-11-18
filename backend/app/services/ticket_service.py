@@ -1,16 +1,19 @@
 from datetime import datetime, timezone
 from fastapi import UploadFile, status
-from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_, exists
+from sqlalchemy.orm import Session, object_session
+from app.core.config import settings
 from app.core.exceptions import AppException
 from app.models.enums import TicketStatus, VALID_STATUS_TRANSITIONS
-from app.models.organization import Department, SupportTeam
+from app.models.organization import SupportTeam
 from app.models.ticket import (
     Ticket,
     TicketAttachment,
     TicketCategory,
     TicketComment,
     TicketHistory,
+    TicketTransferLink,
+    TicketWorkRecord,
 )
 from app.models.user import User
 from app.schemas.ticket import (
@@ -29,12 +32,13 @@ from app.schemas.ticket import (
 from app.schemas.user import UserSummary
 from app.services.audit_service import create_notification, record_audit_log
 from app.services.sla_service import apply_sla_policy_to_ticket, ensure_utc, evaluate_ticket_sla
+from app.services.ticket_access import require_ticket_reader, require_ticket_manager, can_manage_ticket, scoped_ticket_query, personal_ticket_condition
+from app.services.ticket_workflow import accept_ticket, change_status, assign_ticket, ticket_lineage, provisional_ticket_number, finalize_ticket_number
 from app.storage.provider import (
     generate_stored_filename,
     get_storage_provider,
     validate_upload_file,
 )
-from app.core.config import settings
 
 
 def build_user_summary(user: User | None) -> UserSummary | None:
@@ -49,49 +53,24 @@ def build_user_summary(user: User | None) -> UserSummary | None:
         role=user.role,
         department_name=user.department_rel.name if user.department_rel else None,
         support_team_name=user.support_team_rel.name if user.support_team_rel else None,
+        support_team_id=user.support_team_id,
     )
 
 
 def generate_next_ticket_number(db: Session) -> str:
-    year = datetime.now(timezone.utc).year
-    prefix = f"TKT-{year}-"
-    latest = (
-        db.query(Ticket.ticket_number)
-        .filter(Ticket.ticket_number.like(f"{prefix}%"))
-        .order_by(Ticket.id.desc())
-        .first()
-    )
-    next_seq = 1
-    if latest and latest[0]:
-        try:
-            seq_str = latest[0].split("-")[-1]
-            next_seq = int(seq_str) + 1
-        except ValueError:
-            count = db.query(func.count(Ticket.id)).scalar() or 0
-            next_seq = count + 1
-    else:
-        count = db.query(func.count(Ticket.id)).scalar() or 0
-        next_seq = count + 1
-
-    while True:
-        candidate = f"{prefix}{next_seq:04d}"
-        exists = db.query(Ticket.id).filter(Ticket.ticket_number == candidate).first()
-        if not exists:
-            return candidate
-        next_seq += 1
+    return provisional_ticket_number()
 
 
 def check_ticket_access(ticket: Ticket, current_user: User) -> None:
-    if current_user.role == "employee" and ticket.requester_id != current_user.id:
-        raise AppException(
-            message="You do not have permission to access another employee's ticket.",
-            status_code=status.HTTP_403_FORBIDDEN,
-            error_code="TICKET_ACCESS_DENIED",
-        )
+    require_ticket_reader(ticket, current_user)
 
 
 def serialize_ticket_list_item(ticket: Ticket, current_user: User) -> TicketListItemResponse:
     sla_info = evaluate_ticket_sla(ticket)
+    db = object_session(ticket)
+    routing = db.query(TicketTransferLink).filter(TicketTransferLink.successor_ticket_id == ticket.id).first() if db else None
+    routed_by = db.get(User, routing.transferred_by_id) if routing and routing.transferred_by_id else None
+    previous = db.get(Ticket, routing.parent_ticket_id) if routing else None
     visible_comments = [
         c for c in (ticket.comments or []) if current_user.role != "employee" or not c.is_internal
     ]
@@ -105,7 +84,12 @@ def serialize_ticket_list_item(ticket: Ticket, current_user: User) -> TicketList
         category_name=ticket.category_rel.name if ticket.category_rel else "General",
         subcategory=ticket.subcategory,
         priority=ticket.priority,
-        status=ticket.status,
+        status="closed" if ticket.transferred_at else ticket.status,
+        closed_at=ticket.closed_at,
+        transferred_at=ticket.transferred_at,
+        transfer_outcome="transferred" if ticket.transferred_at else None,
+        routed_by=build_user_summary(routed_by),
+        previous_ticket_number=previous.ticket_number if previous else None,
         requester=requester_summary,
         assigned_agent=build_user_summary(ticket.assigned_agent),
         department_name=ticket.department_rel.name if ticket.department_rel else None,
@@ -185,6 +169,13 @@ def serialize_ticket_detail(ticket: Ticket, current_user: User) -> TicketDetailR
         department_id=ticket.department_id,
         support_team_id=ticket.support_team_id,
         reopened_count=ticket.reopened_count,
+        team_received_at=ticket.team_received_at,
+        work_started_at=ticket.work_started_at,
+        original_submitted_at=ticket.sla_started_at,
+        can_accept=current_user.role in ("agent", "admin") and ticket.status == "open" and ticket.assigned_agent_id in (None, current_user.id) and (current_user.role == "admin" or (current_user.support_team_id is not None and ticket.support_team_id == current_user.support_team_id)),
+        can_manage=can_manage_ticket(ticket, current_user) and ticket.status != "transferred" and not ticket.transferred_at,
+        can_chat=ticket.status not in ("closed", "transferred") and (current_user.role == "employee" or can_manage_ticket(ticket, current_user)),
+        lineage=ticket_lineage(object_session(ticket), ticket, current_user),
         sla=sla_info,
         comments=comments_out,
         attachments=attachments_out,
@@ -201,6 +192,7 @@ def list_tickets_service(
     status_filter: str | None = None,
     priority_filter: str | None = None,
     category_id: int | None = None,
+    support_team_id: int | None = None,
     assigned_to_me: bool = False,
     my_tickets: bool = False,
     unassigned_only: bool = False,
@@ -208,22 +200,27 @@ def list_tickets_service(
     sort_by: str = "created_at",
     sort_order: str = "desc",
 ) -> PaginatedTicketsResponse:
-    query = db.query(Ticket)
-
-    # Enforce role-based scoping
-    if current_user.role == "employee" or my_tickets:
-        query = query.filter(Ticket.requester_id == current_user.id)
-    elif assigned_to_me:
-        query = query.filter(Ticket.assigned_agent_id == current_user.id)
-    elif unassigned_only:
-        query = query.filter(Ticket.assigned_agent_id.is_(None))
+    query = scoped_ticket_query(db, current_user, personal=my_tickets, available=not my_tickets and not assigned_to_me)
+    if my_tickets and current_user.role == "admin":
+        query = query.filter(personal_ticket_condition(current_user), Ticket.status != "open",
+            or_(exists().where(TicketWorkRecord.ticket_id == Ticket.id, TicketWorkRecord.user_id == current_user.id),
+                ~exists().where(TicketTransferLink.successor_ticket_id == Ticket.id)))
+    if assigned_to_me:
+        if current_user.role == "admin":
+            query = query.filter(Ticket.assigned_agent_id == current_user.id, Ticket.status == "open")
+        else:
+            query = query.filter(Ticket.status.notin_(("resolved", "closed", "transferred")))
+    if unassigned_only:
+        query = query.filter(Ticket.assigned_agent_id.is_(None), Ticket.status == "open")
 
     if status_filter and status_filter != "all":
-        query = query.filter(Ticket.status == status_filter)
+        query = query.filter(Ticket.transferred_at.is_not(None)) if status_filter == "transferred" else query.filter(Ticket.status == status_filter)
     if priority_filter and priority_filter != "all":
         query = query.filter(Ticket.priority == priority_filter)
     if category_id:
         query = query.filter(Ticket.category_id == category_id)
+    if support_team_id:
+        query = query.filter(Ticket.support_team_id == support_team_id)
 
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -239,7 +236,7 @@ def list_tickets_service(
     if overdue_only:
         now = datetime.now(timezone.utc)
         query = query.filter(
-            Ticket.status.notin_(["resolved", "closed"]),
+            Ticket.status.notin_(["resolved", "closed", "transferred"]),
             Ticket.resolution_due_at < now,
         )
 
@@ -297,7 +294,9 @@ def create_ticket_service(
     current_user: User,
     ip_address: str | None = None,
 ) -> Ticket:
-    category = db.query(TicketCategory).filter(TicketCategory.id == payload.category_id).first()
+    if current_user.role == "employee" and not payload.support_team_id:
+        raise AppException("Select the responsible support team.", status.HTTP_400_BAD_REQUEST, "SUPPORT_TEAM_REQUIRED")
+    category = db.query(TicketCategory).filter(TicketCategory.id == payload.category_id, TicketCategory.is_active == True).first()
     if not category:
         raise AppException(
             message="Selected ticket category does not exist.",
@@ -306,9 +305,25 @@ def create_ticket_service(
         )
 
     dept_id = payload.department_id or current_user.department_id
+    support_team_id = payload.support_team_id
+    team: SupportTeam | None = None
+    if support_team_id is not None:
+        team = (
+            db.query(SupportTeam)
+            .filter(SupportTeam.id == support_team_id, SupportTeam.is_active == True)  # noqa: E712
+            .first()
+        )
+        if not team:
+            raise AppException(
+                message="Selected support team does not exist.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code="INVALID_SUPPORT_TEAM",
+            )
+
     now = datetime.now(timezone.utc)
     ticket_number = generate_next_ticket_number(db)
 
+    # New tickets always start as OPEN and Unassigned until an Agent or Admin accepts/assigns them
     ticket = Ticket(
         ticket_number=ticket_number,
         subject=payload.subject.strip(),
@@ -318,16 +333,21 @@ def create_ticket_service(
         priority=payload.priority,
         status=TicketStatus.OPEN.value,
         requester_id=current_user.id,
+        assigned_agent_id=None,
         department_id=dept_id,
+        support_team_id=support_team_id,
         affected_service=payload.affected_service,
         sla_started_at=now,
+        team_received_at=now,
         created_at=now,
         updated_at=now,
     )
     apply_sla_policy_to_ticket(db, ticket, base_time=now)
     db.add(ticket)
     db.flush()
+    finalize_ticket_number(db, ticket)
 
+    team_note = f" Routed to {team.name}." if team else ""
     history = TicketHistory(
         ticket_id=ticket.id,
         actor_id=current_user.id,
@@ -335,7 +355,7 @@ def create_ticket_service(
         field_name="status",
         old_value=None,
         new_value="open",
-        description=f"Ticket {ticket.ticket_number} created by {current_user.full_name} with {ticket.priority.upper()} priority.",
+        description=f"Ticket {ticket.ticket_number} created by {current_user.full_name} with {ticket.priority.upper()} priority.{team_note}",
         created_at=now,
     )
     db.add(history)
@@ -349,23 +369,23 @@ def create_ticket_service(
         notification_type="ticket_created",
     )
 
-    # Notify active agents/admins if critical priority
-    if ticket.priority in ("critical", "high"):
-        agents = (
-            db.query(User)
-            .join(User.role_rel)
-            .filter(User.is_active == True, User.id != current_user.id)  # noqa: E712
-            .all()
-        )
-        for u in agents:
-            if u.role in ("agent", "admin"):
+    # Notify members of the selected support team (or admins/agents on high/critical tickets)
+    staff_users = (
+        db.query(User)
+        .join(User.role_rel)
+        .filter(User.is_active == True, User.id != current_user.id)  # noqa: E712
+        .all()
+    )
+    for u in staff_users:
+        if u.role in ("agent", "admin"):
+            if (support_team_id and u.support_team_id == support_team_id) or u.role == "admin":
                 create_notification(
                     db=db,
                     user_id=u.id,
                     ticket_id=ticket.id,
                     title=f"[{ticket.priority.upper()}] New Ticket {ticket.ticket_number}",
-                    message=f"{current_user.full_name} reported: {ticket.subject}",
-                    notification_type="high_priority_alert",
+                    message=f"{current_user.full_name} submitted '{ticket.subject}'{team_note}",
+                    notification_type="new_ticket_queue",
                 )
 
     record_audit_log(
@@ -379,6 +399,7 @@ def create_ticket_service(
             "subject": ticket.subject,
             "priority": ticket.priority,
             "category": category.name,
+            "support_team": team.name if team else None,
         },
         ip_address=ip_address,
     )
@@ -396,6 +417,11 @@ def update_ticket_service(
     ip_address: str | None = None,
 ) -> Ticket:
     check_ticket_access(ticket, current_user)
+    if ticket.status in ("closed", "transferred"):
+        raise AppException("This ticket is read-only. Open its successor or reopen it first.", status.HTTP_409_CONFLICT)
+    if current_user.role != "employee":
+        require_ticket_manager(ticket, current_user)
+
     now = datetime.now(timezone.utc)
     changes = []
 
@@ -459,13 +485,7 @@ def update_ticket_service(
         )
 
     if payload.support_team_id is not None and payload.support_team_id != ticket.support_team_id:
-        if current_user.role == "employee":
-            raise AppException("Employees cannot reassign support teams.", status.HTTP_403_FORBIDDEN)
-        team = db.query(SupportTeam).filter(SupportTeam.id == payload.support_team_id).first()
-        old_team = ticket.support_team_rel.name if ticket.support_team_rel else "Unassigned"
-        ticket.support_team_id = team.id if team else None
-        new_team = team.name if team else "Unassigned"
-        changes.append(("support_team", old_team, new_team, f"Support team changed to {new_team}"))
+        raise AppException("Use Transfer to change the responsible support team.", status.HTTP_409_CONFLICT)
 
     for field_name, old_val, new_val, desc in changes:
         action_type = "PRIORITY_CHANGED" if field_name == "priority" else "UPDATED"
@@ -488,242 +508,12 @@ def update_ticket_service(
     return ticket
 
 
-def update_ticket_status_service(
-    db: Session,
-    ticket: Ticket,
-    payload: TicketStatusUpdateRequest,
-    current_user: User,
-    ip_address: str | None = None,
-) -> Ticket:
-    check_ticket_access(ticket, current_user)
-    old_status = TicketStatus(ticket.status)
-    new_status = TicketStatus(payload.status)
-
-    if old_status == new_status:
-        return ticket
-
-    allowed_targets = VALID_STATUS_TRANSITIONS.get(old_status, set())
-    if new_status not in allowed_targets:
-        raise AppException(
-            message=f"Invalid status transition from '{old_status.value}' to '{new_status.value}'.",
-            status_code=status.HTTP_400_BAD_REQUEST,
-            error_code="INVALID_STATUS_TRANSITION",
-        )
-
-    # Role check on status transition:
-    # Employees can only reopen an eligible resolved ticket or close their own resolved ticket
-    if current_user.role == "employee":
-        if not (old_status == TicketStatus.RESOLVED and new_status in (TicketStatus.OPEN, TicketStatus.CLOSED)):
-            raise AppException(
-                message="Employees may only reopen or close a resolved ticket.",
-                status_code=status.HTTP_403_FORBIDDEN,
-                error_code="STATUS_CHANGE_FORBIDDEN",
-            )
-
-    now = datetime.now(timezone.utc)
-    is_reopen = old_status in (TicketStatus.RESOLVED, TicketStatus.CLOSED) and new_status in (
-        TicketStatus.OPEN,
-        TicketStatus.IN_PROGRESS,
-    )
-
-    ticket.status = new_status.value
-    ticket.updated_at = now
-
-    if current_user.role in ("agent", "admin") and not ticket.first_responded_at:
-        ticket.first_responded_at = now
-        first_due = ensure_utc(ticket.first_response_due_at)
-        if first_due and now > first_due:
-            ticket.sla_response_breached = True
-
-    if new_status == TicketStatus.RESOLVED:
-        ticket.resolved_at = now
-        res_due = ensure_utc(ticket.resolution_due_at)
-        if res_due and now > res_due:
-            ticket.sla_resolution_breached = True
-    elif new_status == TicketStatus.CLOSED:
-        ticket.closed_at = now
-        if not ticket.resolved_at:
-            ticket.resolved_at = now
-    elif is_reopen:
-        ticket.reopened_count = (ticket.reopened_count or 0) + 1
-        ticket.resolved_at = None
-        ticket.closed_at = None
-
-    action_label = "REOPENED" if is_reopen else "STATUS_CHANGED"
-    reason_suffix = f" (Reason: {payload.reason.strip()})" if payload.reason and payload.reason.strip() else ""
-    desc = f"Status changed from {old_status.value.replace('_', ' ').title()} to {new_status.value.replace('_', ' ').title()} by {current_user.full_name}{reason_suffix}."
-
-    db.add(
-        TicketHistory(
-            ticket_id=ticket.id,
-            actor_id=current_user.id,
-            action=action_label,
-            field_name="status",
-            old_value=old_status.value,
-            new_value=new_status.value,
-            description=desc,
-            created_at=now,
-        )
-    )
-
-    if payload.reason and payload.reason.strip():
-        db.add(
-            TicketComment(
-                ticket_id=ticket.id,
-                author_id=current_user.id,
-                body=f"**Status changed to {new_status.value.replace('_', ' ').title()}**: {payload.reason.strip()}",
-                is_internal=False,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-
-    # Notify requester if changed by agent/admin
-    if ticket.requester_id != current_user.id:
-        notif_type = "ticket_resolved" if new_status == TicketStatus.RESOLVED else "status_changed"
-        create_notification(
-            db=db,
-            user_id=ticket.requester_id,
-            ticket_id=ticket.id,
-            title=f"Ticket {ticket.ticket_number}: {new_status.value.replace('_', ' ').title()}",
-            message=desc,
-            notification_type=notif_type,
-        )
-    # Notify assigned agent if employee reopened the ticket
-    if is_reopen and ticket.assigned_agent_id and ticket.assigned_agent_id != current_user.id:
-        create_notification(
-            db=db,
-            user_id=ticket.assigned_agent_id,
-            ticket_id=ticket.id,
-            title=f"Ticket Reopened: {ticket.ticket_number}",
-            message=desc,
-            notification_type="ticket_reopened",
-        )
-
-    record_audit_log(
-        db=db,
-        user_id=current_user.id,
-        action="TICKET_STATUS_CHANGED",
-        entity_type="ticket",
-        entity_id=ticket.ticket_number,
-        metadata={
-            "old_status": old_status.value,
-            "new_status": new_status.value,
-            "reopened": is_reopen,
-            "reason": payload.reason,
-        },
-        ip_address=ip_address,
-    )
-
-    db.commit()
-    db.refresh(ticket)
-    return ticket
+def update_ticket_status_service(db, ticket, payload, current_user, ip_address=None):
+    return change_status(db, ticket, payload, current_user)
 
 
-def assign_ticket_service(
-    db: Session,
-    ticket: Ticket,
-    payload: TicketAssignRequest,
-    current_user: User,
-    ip_address: str | None = None,
-) -> Ticket:
-    if current_user.role not in ("agent", "admin"):
-        raise AppException(
-            message="Only IT Support Agents and Administrators can assign tickets.",
-            status_code=status.HTTP_403_FORBIDDEN,
-            error_code="ASSIGN_FORBIDDEN",
-        )
-
-    now = datetime.now(timezone.utc)
-    old_agent_name = ticket.assigned_agent.full_name if ticket.assigned_agent else "Unassigned"
-
-    target_agent: User | None = None
-    if payload.assigned_agent_id is not None:
-        target_agent = db.query(User).filter(User.id == payload.assigned_agent_id).first()
-        if not target_agent or target_agent.role not in ("agent", "admin"):
-            raise AppException(
-                message="Selected assignee must be a valid IT Support Agent or Administrator.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-                error_code="INVALID_AGENT",
-            )
-        ticket.assigned_agent_id = target_agent.id
-        if payload.support_team_id is None and target_agent.support_team_id:
-            ticket.support_team_id = target_agent.support_team_id
-    else:
-        ticket.assigned_agent_id = None
-
-    if payload.support_team_id is not None:
-        team = db.query(SupportTeam).filter(SupportTeam.id == payload.support_team_id).first()
-        if not team:
-            raise AppException("Support team not found.", status.HTTP_400_BAD_REQUEST, "INVALID_TEAM")
-        ticket.support_team_id = team.id
-
-    if target_agent and ticket.status == TicketStatus.OPEN.value:
-        ticket.status = TicketStatus.ASSIGNED.value
-
-    if not ticket.first_responded_at:
-        ticket.first_responded_at = now
-        first_due = ensure_utc(ticket.first_response_due_at)
-        if first_due and now > first_due:
-            ticket.sla_response_breached = True
-
-    new_agent_name = target_agent.full_name if target_agent else "Unassigned"
-    ticket.updated_at = now
-
-    desc = f"Ticket assigned from {old_agent_name} to {new_agent_name} by {current_user.full_name}."
-    if payload.note:
-        desc += f" Note: {payload.note.strip()}"
-
-    db.add(
-        TicketHistory(
-            ticket_id=ticket.id,
-            actor_id=current_user.id,
-            action="ASSIGNED",
-            field_name="assigned_agent",
-            old_value=old_agent_name,
-            new_value=new_agent_name,
-            description=desc,
-            created_at=now,
-        )
-    )
-
-    if target_agent and target_agent.id != current_user.id:
-        create_notification(
-            db=db,
-            user_id=target_agent.id,
-            ticket_id=ticket.id,
-            title=f"Ticket Assigned to You: {ticket.ticket_number}",
-            message=f"{current_user.full_name} assigned '{ticket.subject}' ({ticket.priority.upper()}) to you.",
-            notification_type="ticket_assigned",
-        )
-
-    if ticket.requester_id != current_user.id and target_agent:
-        create_notification(
-            db=db,
-            user_id=ticket.requester_id,
-            ticket_id=ticket.id,
-            title=f"Agent Assigned: {ticket.ticket_number}",
-            message=f"{target_agent.full_name} has been assigned to your support ticket.",
-            notification_type="ticket_assigned",
-        )
-
-    record_audit_log(
-        db=db,
-        user_id=current_user.id,
-        action="TICKET_ASSIGNED",
-        entity_type="ticket",
-        entity_id=ticket.ticket_number,
-        metadata={
-            "old_agent": old_agent_name,
-            "new_agent": new_agent_name,
-            "new_agent_id": target_agent.id if target_agent else None,
-        },
-        ip_address=ip_address,
-    )
-
-    db.commit()
-    db.refresh(ticket)
-    return ticket
+def assign_ticket_service(db, ticket, payload, current_user, ip_address=None):
+    return assign_ticket(db, ticket, payload, current_user)
 
 
 def add_ticket_comment_service(
@@ -734,6 +524,11 @@ def add_ticket_comment_service(
     ip_address: str | None = None,
 ) -> TicketComment:
     check_ticket_access(ticket, current_user)
+    if ticket.status in ("closed", "transferred"):
+        raise AppException("This ticket is read-only. Open its successor or reopen it first.", status.HTTP_409_CONFLICT)
+    if current_user.role != "employee":
+        require_ticket_manager(ticket, current_user)
+
 
     if payload.is_internal and current_user.role == "employee":
         raise AppException(
@@ -780,7 +575,6 @@ def add_ticket_comment_service(
         )
     )
 
-    # Notify relevant party on public comments
     if not payload.is_internal:
         if current_user.id != ticket.requester_id:
             create_notification(
@@ -824,6 +618,11 @@ async def upload_ticket_attachment_service(
     ip_address: str | None = None,
 ) -> TicketAttachment:
     check_ticket_access(ticket, current_user)
+    if ticket.status in ("closed", "transferred"):
+        raise AppException("This ticket is read-only. Open its successor or reopen it first.", status.HTTP_409_CONFLICT)
+    if current_user.role != "employee":
+        require_ticket_manager(ticket, current_user)
+
 
     content_bytes = await file.read()
     original_name, ext, size = validate_upload_file(file, content_bytes)

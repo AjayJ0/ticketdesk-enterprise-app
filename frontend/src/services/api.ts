@@ -1,47 +1,111 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "/api/v1";
 
-const ACCESS_TOKEN_KEY = "td_access_token";
-const REFRESH_TOKEN_KEY = "td_refresh_token";
+const SESSION_KEY = "td_tab_session";
+export const AUTH_SESSION_CLEARED = "ticketdesk:session-cleared";
 
-export function getAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_TOKEN_KEY);
+export interface AuthSession {
+  id: string;
+  subject: string;
+  role: string;
+  accountIdentity: string;
+  accessToken: string;
+  refreshToken: string;
 }
 
-export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY);
+export function tokenIdentity(token: string): { subject: string; role: string; accountIdentity: string } {
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(atob(part));
+    if (!payload.sub || !payload.role || !payload.sid) throw new Error("Missing identity");
+    return { subject: String(payload.sub), role: String(payload.role), accountIdentity: String(payload.sid) };
+  } catch {
+    throw new ApiError("Invalid session identity. Please sign in again.", 401, "INVALID_SESSION");
+  }
 }
+
+export function getAuthSession(): AuthSession | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) as AuthSession : null;
+  } catch { return null; }
+}
+
+export function getAccessToken(): string | null { return getAuthSession()?.accessToken || null; }
+export function getRefreshToken(): string | null { return getAuthSession()?.refreshToken || null; }
 
 export function setAuthTokens(accessToken: string, refreshToken: string): void {
-  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+  const identity = tokenIdentity(accessToken);
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id: crypto.randomUUID(), ...identity, accessToken, refreshToken }));
+  // Legacy origin-wide sessions are never imported: another tab may own them.
+  localStorage.removeItem("td_access_token");
+  localStorage.removeItem("td_refresh_token");
 }
 
-export function clearAuthTokens(): void {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
+export function clearAuthTokens(expectedId?: string): void {
+  if (expectedId && getAuthSession()?.id !== expectedId) return;
+  sessionStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem("td_access_token");
+  localStorage.removeItem("td_refresh_token");
+  window.dispatchEvent(new Event(AUTH_SESSION_CLEARED));
 }
 
-async function tryRefreshTokens(): Promise<string | null> {
-  const refresh = getRefreshToken();
-  if (!refresh) return null;
-  try {
-    const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refresh }),
-    });
-    if (!res.ok) {
-      clearAuthTokens();
-      return null;
+const refreshes = new Map<string, Promise<boolean>>();
+const sameSession = (session: AuthSession) => getAuthSession()?.id === session.id;
+
+async function tryRefreshTokens(session: AuthSession): Promise<boolean> {
+  const running = refreshes.get(session.id);
+  if (running) return running;
+  const work = (async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: session.refreshToken }),
+      });
+      if (!sameSession(session)) return false;
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) clearAuthTokens(session.id);
+        return false;
+      }
+      const data = await response.json();
+      if (!sameSession(session)) return false;
+      const identity = tokenIdentity(data.access_token);
+      if (identity.subject !== session.subject || identity.role !== session.role || identity.accountIdentity !== session.accountIdentity || String(data.user?.id) !== session.subject) {
+        clearAuthTokens(session.id);
+        throw new ApiError("Session identity changed. Please sign in explicitly.", 401, "SESSION_IDENTITY_MISMATCH");
+      }
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...session, accessToken: data.access_token, refreshToken: data.refresh_token }));
+      return true;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      return false; // A transient network failure must not overwrite/logout another session.
     }
-    const data = await res.json();
-    setAuthTokens(data.access_token, data.refresh_token);
-    return data.access_token;
-  } catch {
-    clearAuthTokens();
-    return null;
+  })();
+  refreshes.set(session.id, work);
+  try { return await work; } finally { refreshes.delete(session.id); }
+}
+
+export async function revokeAuthSession(session: AuthSession): Promise<void> {
+  await fetch(`${API_BASE_URL}/auth/logout`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.accessToken}` },
+    body: JSON.stringify({ refresh_token: session.refreshToken }),
+  });
+}
+
+async function authorizedFetch(endpoint: string, options: RequestInit = {}, retry = true): Promise<Response> {
+  const session = getAuthSession();
+  const isLogin = endpoint === "/auth/login";
+  const headers = new Headers(options.headers || {});
+  if (session && !isLogin) headers.set("Authorization", `Bearer ${session.accessToken}`);
+  if (!(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, { ...options, headers });
+  if (!isLogin && session && !sameSession(session)) throw new ApiError("The session changed while this request was running.", 409, "SESSION_CHANGED");
+  if (response.status === 401 && retry && session && !isLogin) {
+    // A parallel request may already have refreshed the same session.
+    const refreshed = getAccessToken() !== session.accessToken || await tryRefreshTokens(session);
+    if (refreshed && sameSession(session)) return authorizedFetch(endpoint, options, false);
   }
+  return response;
 }
 
 export class ApiError extends Error {
@@ -62,27 +126,8 @@ export async function apiRequest<T>(
   options: RequestInit = {},
   retry = true
 ): Promise<T> {
-  const token = getAccessToken();
-  const headers = new Headers(options.headers || {});
-
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-  if (!(options.body instanceof FormData) && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
-    headers,
-  });
-
-  if (response.status === 401 && retry && !endpoint.startsWith("/auth/login")) {
-    const newToken = await tryRefreshTokens();
-    if (newToken) {
-      return apiRequest<T>(endpoint, options, false);
-    }
-  }
+  const sessionId = getAuthSession()?.id;
+  const response = await authorizedFetch(endpoint, options, retry);
 
   if (!response.ok) {
     let errMsg = `Request failed (${response.status})`;
@@ -104,17 +149,15 @@ export async function apiRequest<T>(
     throw new ApiError(errMsg, response.status, errCode, errDetails);
   }
 
-  return response.json() as Promise<T>;
+  const data = await response.json() as T;
+  if (endpoint !== "/auth/login" && sessionId && getAuthSession()?.id !== sessionId) {
+    throw new ApiError("The session changed while this response was being read.", 409, "SESSION_CHANGED");
+  }
+  return data;
 }
 
 export async function downloadAuthorizedBlob(endpoint: string, filename: string): Promise<void> {
-  const token = getAccessToken();
-  const headers = new Headers();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, { headers });
+  const response = await authorizedFetch(endpoint);
   if (!response.ok) {
     throw new ApiError("Failed to download file", response.status);
   }

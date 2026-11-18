@@ -70,6 +70,10 @@ class Ticket(Base):
 
     affected_service = Column(String(150), nullable=True)
 
+    team_received_at = Column(DateTime(timezone=True), nullable=True)
+    work_started_at = Column(DateTime(timezone=True), nullable=True)
+    transferred_at = Column(DateTime(timezone=True), nullable=True)
+
     # SLA tracking fields
     sla_policy_id = Column(Integer, ForeignKey("sla_policies.id", ondelete="SET NULL"), nullable=True)
     sla_started_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -168,3 +172,22 @@ class TicketHistory(Base):
 
     ticket = relationship("Ticket", back_populates="history")
     actor = relationship("User", lazy="joined")
+
+
+class TicketTransferLink(Base):
+    __tablename__ = "ticket_transfer_links"
+    parent_ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), primary_key=True)
+    successor_ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), unique=True, nullable=False)
+    transferred_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reason = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class TicketWorkRecord(Base):
+    __tablename__ = "ticket_work_records"
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    accepted_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    outcome = Column(String(30), nullable=True)

@@ -3,12 +3,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_admin, require_agent_or_admin
 from app.core.exceptions import AppException
 from app.core.security import get_password_hash
 from app.middleware.rate_limit import get_client_ip
 from app.models.organization import Department, Role, SupportTeam
+from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory
 from app.models.user import User
 from app.schemas.auth import DepartmentInfo, SupportTeamInfo, UserRoleInfo
 from app.schemas.user import (
@@ -22,6 +24,7 @@ from app.schemas.user import (
     UserUpdateRequest,
 )
 from app.services.audit_service import record_audit_log
+from app.services.organization_service import resolve_user_organization
 from app.services.ticket_service import build_user_summary
 
 router = APIRouter(prefix="/users", tags=["Users & Organization"])
@@ -137,6 +140,36 @@ def create_support_team(
     return SupportTeamInfo.model_validate(team)
 
 
+@router.delete("/support-teams/{team_id}")
+def delete_support_team(
+    team_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> dict:
+    team = db.query(SupportTeam).filter(SupportTeam.id == team_id).first()
+    if not team:
+        raise AppException("Support team not found.", status.HTTP_404_NOT_FOUND)
+
+    team_name = team.name
+    team_code = team.code
+    db.query(User).filter(User.support_team_id == team.id).update({"support_team_id": None})
+    db.query(Ticket).filter(Ticket.support_team_id == team.id).update({"support_team_id": None})
+    db.delete(team)
+
+    record_audit_log(
+        db=db,
+        user_id=current_user.id,
+        action="SUPPORT_TEAM_DELETED",
+        entity_type="support_team",
+        entity_id=team_code,
+        metadata={"name": team_name},
+        ip_address=get_client_ip(request),
+    )
+    db.commit()
+    return {"success": True, "message": f"Support team '{team_name}' removed."}
+
+
 @router.get("/agents", response_model=List[UserSummary])
 def list_support_agents(
     db: Session = Depends(get_db),
@@ -164,6 +197,7 @@ def list_users(
     search: Optional[str] = Query(None),
     role: Optional[str] = Query(None),
     department_id: Optional[int] = Query(None),
+    support_team_id: Optional[int] = Query(None),
     is_active: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
@@ -174,6 +208,8 @@ def list_users(
         query = query.filter(Role.name == role)
     if department_id:
         query = query.filter(User.department_id == department_id)
+    if support_team_id:
+        query = query.filter(User.support_team_id == support_team_id)
     if is_active is not None:
         query = query.filter(User.is_active == is_active)
 
@@ -185,6 +221,7 @@ def list_users(
                 User.email.ilike(term),
                 User.employee_id.ilike(term),
                 User.job_title.ilike(term),
+                User.phone.ilike(term),
             )
         )
 
@@ -222,7 +259,7 @@ def create_user(
     if existing_email:
         raise AppException("A user with this email address already exists.", status.HTTP_409_CONFLICT, "EMAIL_EXISTS")
 
-    if payload.employee_id:
+    if payload.employee_id and payload.employee_id.strip():
         existing_emp = db.query(User).filter(User.employee_id == payload.employee_id.strip()).first()
         if existing_emp:
             raise AppException("Employee ID is already assigned to another user.", status.HTTP_409_CONFLICT)
@@ -231,40 +268,53 @@ def create_user(
     if not role_obj:
         raise AppException("Invalid role specified.", status.HTTP_400_BAD_REQUEST)
 
-    now = datetime.now(timezone.utc)
-    new_user = User(
-        email=payload.email.lower().strip(),
-        full_name=payload.full_name.strip(),
-        employee_id=payload.employee_id.strip() if payload.employee_id else None,
-        job_title=payload.job_title,
-        phone=payload.phone,
-        hashed_password=get_password_hash(payload.password),
-        is_active=payload.is_active,
-        role_id=role_obj.id,
-        department_id=payload.department_id,
-        support_team_id=payload.support_team_id,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(new_user)
-    db.flush()
+    try:
+        now = datetime.now(timezone.utc)
+        department_id = resolve_user_organization(db, Department, payload.department_id, payload.department_name, current_user.id)
+        support_team_id = resolve_user_organization(db, SupportTeam, payload.support_team_id, payload.support_team_name, current_user.id)
+        new_user = User(
+            email=payload.email.lower().strip(),
+            full_name=payload.full_name.strip(),
+            employee_id=payload.employee_id.strip() if payload.employee_id and payload.employee_id.strip() else None,
+            job_title=payload.job_title,
+            phone=payload.phone.strip() if payload.phone and payload.phone.strip() else None,
+            hashed_password=get_password_hash(payload.password),
+            is_active=payload.is_active,
+            role_id=role_obj.id,
+            department_id=department_id,
+            support_team_id=support_team_id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(new_user)
+        db.flush()
 
-    record_audit_log(
-        db=db,
-        user_id=current_user.id,
-        action="USER_CREATED",
-        entity_type="user",
-        entity_id=new_user.id,
-        metadata={
-            "email": new_user.email,
-            "full_name": new_user.full_name,
-            "role": payload.role,
-        },
-        ip_address=get_client_ip(request),
-    )
-    db.commit()
-    db.refresh(new_user)
-    return _serialize_user_detail(new_user)
+        record_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="USER_CREATED",
+            entity_type="user",
+            entity_id=new_user.id,
+            metadata={
+                "email": new_user.email,
+                "full_name": new_user.full_name,
+                "role": payload.role,
+                "phone": new_user.phone,
+            },
+            ip_address=get_client_ip(request),
+        )
+        db.commit()
+        db.refresh(new_user)
+        return _serialize_user_detail(new_user)
+    except AppException:
+        db.rollback()
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise AppException(
+            "An account or organization with these details was created concurrently. Check the details and retry; no partial account or organization changes were saved.",
+            status.HTTP_409_CONFLICT, "ACCOUNT_CREATION_CONFLICT",
+        )
 
 
 @router.put("/{user_id}", response_model=UserDetailResponse)
@@ -283,6 +333,14 @@ def update_user(
         raise AppException("You cannot deactivate your own administrator account.", status.HTTP_400_BAD_REQUEST)
 
     changes = {}
+    if payload.email is not None:
+        email_clean = payload.email.lower().strip()
+        if email_clean != user.email.lower():
+            dup = db.query(User).filter(func.lower(User.email) == email_clean, User.id != user.id).first()
+            if dup:
+                raise AppException("Another user already uses this email address.", status.HTTP_409_CONFLICT)
+            user.email = email_clean
+            changes["email"] = user.email
     if payload.full_name is not None:
         user.full_name = payload.full_name.strip()
         changes["full_name"] = user.full_name
@@ -293,7 +351,7 @@ def update_user(
         user.job_title = payload.job_title
         changes["job_title"] = user.job_title
     if payload.phone is not None:
-        user.phone = payload.phone
+        user.phone = payload.phone.strip() or None
         changes["phone"] = user.phone
     if payload.department_id is not None:
         user.department_id = payload.department_id if payload.department_id > 0 else None
@@ -366,3 +424,42 @@ def update_user_role(
     db.commit()
     db.refresh(user)
     return _serialize_user_detail(user)
+
+
+@router.delete("/{user_id}")
+def delete_user(
+    user_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> dict:
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise AppException("User not found.", status.HTTP_404_NOT_FOUND)
+    if user.id == current_user.id:
+        raise AppException("You cannot delete your own active administrator account.", status.HTTP_400_BAD_REQUEST)
+
+    deleted_email = user.email
+    deleted_name = user.full_name
+
+    # Clean up dependent records safely
+    db.query(Ticket).filter(Ticket.assigned_agent_id == user.id).update({"assigned_agent_id": None})
+    db.query(TicketHistory).filter(TicketHistory.actor_id == user.id).update({"actor_id": None})
+    db.query(TicketComment).filter(TicketComment.author_id == user.id).delete()
+    db.query(TicketAttachment).filter(TicketAttachment.uploaded_by_id == user.id).delete()
+    for t in db.query(Ticket).filter(Ticket.requester_id == user.id).all():
+        db.delete(t)
+
+    db.delete(user)
+
+    record_audit_log(
+        db=db,
+        user_id=current_user.id,
+        action="USER_DELETED",
+        entity_type="user",
+        entity_id=user_id,
+        metadata={"email": deleted_email, "full_name": deleted_name},
+        ip_address=get_client_ip(request),
+    )
+    db.commit()
+    return {"success": True, "message": f"User '{deleted_name}' deleted."}

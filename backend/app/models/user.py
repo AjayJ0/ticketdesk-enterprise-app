@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -12,6 +13,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
+    session_identity = Column(String(36), default=lambda: str(uuid4()), nullable=True, unique=True, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     full_name = Column(String(150), nullable=False, index=True)
     employee_id = Column(String(50), unique=True, nullable=True, index=True)
@@ -57,6 +59,8 @@ class RefreshToken(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_identity = Column(String(36), nullable=True)
+    role_at_issue = Column(String(50), nullable=True)
     token_hash = Column(String(128), unique=True, nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     revoked = Column(Boolean, default=False, nullable=False, index=True)

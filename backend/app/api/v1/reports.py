@@ -6,12 +6,14 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import require_agent_or_admin
 from app.models.user import User
+from app.models.ticket import TicketWorkRecord
 from app.schemas.dashboard import AgentPerformanceItem
 from app.services.analytics_service import (
     filter_tickets_by_date_range,
     generate_sla_report_data,
     generate_tickets_report_data,
     get_agent_performance_list,
+    work_outcome,
 )
 from app.services.sla_service import evaluate_ticket_sla
 
@@ -25,7 +27,7 @@ def get_tickets_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_agent_or_admin),
 ) -> Dict[str, Any]:
-    return generate_tickets_report_data(db, start_date=start_date, end_date=end_date)
+    return generate_tickets_report_data(db, start_date=start_date, end_date=end_date, current_user=current_user)
 
 
 @router.get("/sla")
@@ -35,7 +37,7 @@ def get_sla_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_agent_or_admin),
 ) -> Dict[str, Any]:
-    return generate_sla_report_data(db, start_date=start_date, end_date=end_date)
+    return generate_sla_report_data(db, start_date=start_date, end_date=end_date, current_user=current_user)
 
 
 @router.get("/agents", response_model=List[AgentPerformanceItem])
@@ -43,7 +45,7 @@ def get_agents_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_agent_or_admin),
 ) -> List[AgentPerformanceItem]:
-    return get_agent_performance_list(db)
+    return get_agent_performance_list(db, current_user)
 
 
 @router.get("/export/csv")
@@ -53,8 +55,10 @@ def export_tickets_report_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_agent_or_admin),
 ) -> Response:
-    tickets = filter_tickets_by_date_range(db, start_date=start_date, end_date=end_date)
+    tickets = filter_tickets_by_date_range(db, start_date=start_date, end_date=end_date, current_user=current_user)
 
+    records = {(row.ticket_id, row.user_id): row for row in db.query(TicketWorkRecord).all()}
+    actor = current_user if current_user.role == "agent" else None
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
@@ -74,6 +78,12 @@ def export_tickets_report_csv(
             "SLA Health",
             "Created At (UTC)",
             "Resolved At (UTC)",
+            "Transferred At (UTC)",
+            "Team Received At (UTC)",
+            "Work Started At (UTC)",
+            "My Work Outcome" if actor else "Outcome",
+            "Original SLA Started At (UTC)",
+            "Original Resolution Due At (UTC)",
         ]
     )
 
@@ -96,6 +106,12 @@ def export_tickets_report_csv(
                 sla.sla_health.upper(),
                 t.created_at.isoformat() if t.created_at else "",
                 t.resolved_at.isoformat() if t.resolved_at else "",
+                t.transferred_at.isoformat() if t.transferred_at else "",
+                t.team_received_at.isoformat() if t.team_received_at else "",
+                t.work_started_at.isoformat() if t.work_started_at else "",
+                work_outcome(t, actor, records),
+                t.sla_started_at.isoformat() if t.sla_started_at else "",
+                t.resolution_due_at.isoformat() if t.resolution_due_at else "",
             ]
         )
 

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -51,6 +51,11 @@ export const TicketDetailPage: React.FC = () => {
   const [statusReason, setStatusReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [rejectAssignment, setRejectAssignment] = useState(false);
+  const [targetTeam, setTargetTeam] = useState("");
+  const [targetAgent, setTargetAgent] = useState("");
+  const [transferReason, setTransferReason] = useState("");
 
   const {
     data: ticket,
@@ -60,6 +65,7 @@ export const TicketDetailPage: React.FC = () => {
     queryKey: ["ticket", ticketId],
     queryFn: () => apiRequest<TicketDetail>(`/tickets/${ticketId}`),
     enabled: !!ticketId,
+    refetchInterval: 5000,
   });
 
   const isStaff = user?.role === "agent" || user?.role === "admin";
@@ -81,6 +87,7 @@ export const TicketDetailPage: React.FC = () => {
     queryClient.invalidateQueries({ queryKey: ["tickets"] });
     queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
     queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    queryClient.invalidateQueries({ queryKey: ["sla-alerts"] });
   };
 
   const statusMutation = useMutation({
@@ -113,6 +120,21 @@ export const TicketDetailPage: React.FC = () => {
     onError: (err: unknown) => {
       setActionError(err instanceof ApiError ? err.message : "Failed to assign ticket.");
     },
+  });
+
+  const acceptMutation = useMutation({
+    mutationFn: () => apiRequest<TicketDetail>(`/tickets/${ticketId}/accept`, { method: "POST" }),
+    onSuccess: () => { setActionError(null); refreshTicketData(); },
+    onError: (err: unknown) => { setActionError(err instanceof ApiError ? err.message : "Unable to accept ticket."); refreshTicketData(); },
+  });
+  const transferMutation = useMutation({
+    mutationFn: () => apiRequest(`/tickets/${ticketId}/transfer`, { method: "POST", body: JSON.stringify({
+      support_team_id: targetTeam === "admin" ? null : Number(targetTeam),
+      escalate_to_admin: targetTeam === "admin", reject_assignment: rejectAssignment,
+      assigned_agent_id: targetAgent ? Number(targetAgent) : null, reason: transferReason.trim(),
+    }) }),
+    onSuccess: () => { setTransferOpen(false); setRejectAssignment(false); setTransferReason(""); setActionError(null); refreshTicketData(); },
+    onError: (err: unknown) => setActionError(err instanceof ApiError ? err.message : "Unable to transfer ticket."),
   });
 
   const updatePriorityMutation = useMutation({
@@ -202,74 +224,15 @@ export const TicketDetailPage: React.FC = () => {
 
   // Compute available status transitions for current user
   const getAvailableStatusActions = (): { label: string; target: TicketStatus; variant: string }[] => {
-    const current = ticket.status;
-    if (user.role === "employee") {
-      if (current === "resolved") {
-        return [
-          {
-            label: "Reopen Ticket",
-            target: "open",
-            variant: "bg-amber-600 hover:bg-amber-700 text-white",
-          },
-          {
-            label: "Confirm & Close Ticket",
-            target: "closed",
-            variant: "bg-emerald-600 hover:bg-emerald-700 text-white",
-          },
-        ];
-      }
-      return [];
-    }
-
-    // Staff transitions (Open -> Assigned -> In Progress -> Pending -> Resolved -> Closed)
+    const style = "bg-blue-600 hover:bg-blue-700 text-white";
+    if (user.role === "employee") return ticket.status === "resolved" ? [{ label: "Reopen Ticket", target: "open", variant: style }] : [];
+    if (!ticket.can_manage || ticket.status === "transferred") return [];
     const actions: { label: string; target: TicketStatus; variant: string }[] = [];
-    if (current === "open" || current === "assigned") {
-      actions.push({
-        label: "Start Progress",
-        target: "in_progress",
-        variant: "bg-blue-600 hover:bg-blue-700 text-white",
-      });
-    }
-    if (current === "in_progress") {
-      actions.push({
-        label: "Mark Pending",
-        target: "pending",
-        variant: "bg-purple-600 hover:bg-purple-700 text-white",
-      });
-    }
-    if (current === "pending") {
-      actions.push({
-        label: "Resume Progress",
-        target: "in_progress",
-        variant: "bg-blue-600 hover:bg-blue-700 text-white",
-      });
-    }
-    if (current !== "resolved" && current !== "closed") {
-      actions.push({
-        label: "Resolve Ticket",
-        target: "resolved",
-        variant: "bg-emerald-600 hover:bg-emerald-700 text-white",
-      });
-    }
-    if (current === "resolved") {
-      actions.push({
-        label: "Close Ticket",
-        target: "closed",
-        variant: "bg-slate-800 hover:bg-slate-900 text-white",
-      });
-      actions.push({
-        label: "Reopen Ticket",
-        target: "in_progress",
-        variant: "bg-amber-600 hover:bg-amber-700 text-white",
-      });
-    }
-    if (current === "closed") {
-      actions.push({
-        label: "Reopen Ticket",
-        target: "open",
-        variant: "bg-amber-600 hover:bg-amber-700 text-white",
-      });
-    }
+    if (ticket.status === "assigned" || ticket.status === "pending") actions.push({ label: "Start Progress", target: "in_progress", variant: style });
+    if (ticket.status === "in_progress") actions.push({ label: "Mark Pending", target: "pending", variant: style });
+    if (["assigned", "in_progress", "pending", "resolved"].includes(ticket.status)) actions.push({ label: "Close Ticket", target: "closed", variant: "bg-slate-800 hover:bg-slate-900 text-white" });
+    if (["in_progress", "pending"].includes(ticket.status)) actions.push({ label: "Mark Resolved", target: "resolved", variant: style });
+    if (ticket.status === "resolved" || ticket.status === "closed") actions.push({ label: "Reopen Ticket", target: "open", variant: style });
     return actions;
   };
 
@@ -292,6 +255,7 @@ export const TicketDetailPage: React.FC = () => {
               {ticket.ticket_number}
             </span>
             <StatusBadge status={ticket.status} />
+            {ticket.transfer_outcome && <span className="rounded bg-cyan-50 px-2 py-1 text-xs font-semibold text-cyan-800">Transferred</span>}
             <PriorityBadge priority={ticket.priority} />
             <SLABadge health={ticket.sla.sla_health} />
             {ticket.reopened_count > 0 && (
@@ -308,22 +272,14 @@ export const TicketDetailPage: React.FC = () => {
 
         {/* Primary Workflow Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
-          {isStaff && (!ticket.assigned_agent || ticket.assigned_agent.id !== user.id) && (
-            <button
-              onClick={() =>
-                assignMutation.mutate({
-                  assigned_agent_id: user.id,
-                  note: "Accepted ticket from queue",
-                })
-              }
-              disabled={assignMutation.isPending}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold transition-colors cursor-pointer"
-            >
-              <UserCheck className="w-4 h-4" />
-              Accept Ticket
-            </button>
-          )}
+          {ticket.can_accept && <button onClick={() => acceptMutation.mutate()} disabled={acceptMutation.isPending}
+            className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-semibold text-blue-700">Accept Ticket</button>}
+          {ticket.can_manage && !["resolved", "closed", "transferred"].includes(ticket.status) && <button
+            onClick={() => { setRejectAssignment(false); setTransferOpen(!transferOpen); }} className="rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-xs font-semibold text-cyan-800">Transfer Ticket</button>}
 
+          {user.role === "admin" && ticket.status === "open" && ticket.assigned_agent?.id === user.id && <button
+            onClick={() => { setRejectAssignment(true); setTransferOpen(true); setTargetTeam(""); setTargetAgent(""); }}
+            className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-800">Reject / Redirect</button>}
           {statusActions.map((act) => (
             <button
               key={act.target}
@@ -355,6 +311,27 @@ export const TicketDetailPage: React.FC = () => {
         </div>
       )}
 
+      {(ticket.lineage?.length || 0) > 0 && <section className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm">
+        <h2 className="font-bold text-cyan-900">Linked request history</h2>
+        <p className="mt-1 text-xs text-cyan-800">Previous conversations, attachments and completed work are preserved in the linked tickets. Original submission: {formatDateTime(ticket.original_submitted_at)}</p>
+        <div className="mt-2 flex flex-wrap gap-3">{ticket.lineage?.map(link => link.can_open
+          ? <Link key={link.id} to={`/tickets/${link.ticket_number}`} className="font-semibold text-blue-700 underline">{link.relation}: {link.ticket_number} ({link.status})</Link>
+          : <span key={link.id}>{link.relation}: {link.ticket_number} ({link.status}) — routed to {link.support_team_name}</span>)}</div>
+      </section>}
+      {transferOpen && <section className="space-y-3 rounded-xl border border-cyan-200 bg-white p-5">
+        <h2 className="font-bold">{rejectAssignment ? "Reject assignment and redirect" : "Transfer or escalate"}</h2>
+        <p className="text-xs text-slate-600">Closes this work segment with a Transferred outcome and creates a linked Open ticket. The original overall SLA deadline stays {formatDateTime(ticket.resolution_due_at)}.</p>
+        <select aria-label="Transfer target team" value={targetTeam} onChange={e => { setTargetTeam(e.target.value); setTargetAgent(""); }} className="w-full rounded border p-2">
+          <option value="">Select target support team</option><option value="admin">Administrator escalation</option>{supportTeams?.map(team => <option key={team.id} value={team.id}>{team.name}</option>)}
+        </select>
+        <select aria-label="Transfer target consultant" value={targetAgent} onChange={e => setTargetAgent(e.target.value)} disabled={!targetTeam} className="w-full rounded border p-2">
+          <option value="">{targetTeam === "admin" ? "Select administrator" : "Available team queue"}</option>{agents?.filter(agent => targetTeam === "admin" ? agent.role === "admin" : agent.support_team_id === Number(targetTeam)).map(agent => <option key={agent.id} value={agent.id}>{agent.full_name}</option>)}
+        </select>
+        <textarea aria-label="Transfer reason and completed work" value={transferReason} onChange={e => setTransferReason(e.target.value)} placeholder="Describe completed work and why this specialty is needed" maxLength={2000} className="w-full rounded border p-2" />
+        <button onClick={() => transferMutation.mutate()} disabled={!targetTeam || (targetTeam === "admin" && !targetAgent) || transferReason.trim().length < 5 || transferMutation.isPending} className="rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Confirm Transfer</button>
+      </section>}
+
+      {ticket.routed_by && <p className="rounded-lg bg-slate-100 p-3 text-sm">Assigned by {ticket.routed_by.full_name} ({ticket.routed_by.support_team_name || ticket.routed_by.role}) from {ticket.previous_ticket_number}.</p>}
       {/* Two-Column Enterprise Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* LEFT / MAIN PANEL (2 columns) */}
@@ -420,7 +397,7 @@ export const TicketDetailPage: React.FC = () => {
                   type="file"
                   accept=".pdf,.png,.jpg,.jpeg,.txt"
                   onChange={handleAttachmentUpload}
-                  disabled={uploadingFile}
+                  disabled={uploadingFile || !ticket.can_chat}
                   className="hidden"
                 />
               </label>
@@ -473,7 +450,7 @@ export const TicketDetailPage: React.FC = () => {
               <div className="flex items-center gap-2">
                 <MessageSquare className="w-4 h-4 text-blue-600" />
                 <h2 className="text-sm font-bold text-slate-900">
-                  Ticket Communication & Notes ({ticket.comments.length})
+                  Ticket Conversation & Notes ({ticket.comments.length})
                 </h2>
               </div>
             </div>
@@ -523,7 +500,7 @@ export const TicketDetailPage: React.FC = () => {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                if (!commentBody.trim()) return;
+                if (!commentBody.trim() || !ticket.can_chat) return;
                 commentMutation.mutate({
                   body: commentBody.trim(),
                   is_internal: isStaff ? isInternalNote : false,
@@ -561,6 +538,7 @@ export const TicketDetailPage: React.FC = () => {
 
               <textarea
                 rows={3}
+                disabled={!ticket.can_chat}
                 value={commentBody}
                 onChange={(e) => setCommentBody(e.target.value)}
                 placeholder={
@@ -578,7 +556,7 @@ export const TicketDetailPage: React.FC = () => {
               <div className="flex justify-end">
                 <button
                   type="submit"
-                  disabled={!commentBody.trim() || commentMutation.isPending}
+                  disabled={!ticket.can_chat || !commentBody.trim() || commentMutation.isPending}
                   className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white disabled:opacity-50 cursor-pointer ${
                     isInternalNote
                       ? "bg-amber-600 hover:bg-amber-700"
@@ -642,7 +620,7 @@ export const TicketDetailPage: React.FC = () => {
             <div>
               <p className="text-xs font-semibold text-slate-200">{ticket.sla.policy_name}</p>
               <p className="text-lg font-bold text-white mt-1">
-                {ticket.status === "resolved" || ticket.status === "closed"
+                {ticket.sla.sla_health === "closed" ? "Closed" : ticket.status === "resolved"
                   ? ticket.sla.resolution_breached
                     ? "Completed Outside SLA Target"
                     : "Resolved Within SLA Target"
@@ -712,7 +690,7 @@ export const TicketDetailPage: React.FC = () => {
                 <span className="text-slate-500 font-medium">Priority Level</span>
                 <PriorityBadge priority={ticket.priority} />
               </div>
-              {isStaff && (
+              {ticket.can_manage && !["closed", "transferred"].includes(ticket.status) && (
                 <select
                   value={ticket.priority}
                   onChange={(e) =>
@@ -738,7 +716,7 @@ export const TicketDetailPage: React.FC = () => {
                   {ticket.assigned_agent ? ticket.assigned_agent.full_name : "Unassigned"}
                 </span>
               </div>
-              {isStaff && (
+              {user.role === "admin" && ticket.can_manage && !["closed", "transferred"].includes(ticket.status) && (
                 <div className="flex items-center gap-1.5 pt-1">
                   <UserPlus className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                   <select
@@ -754,7 +732,7 @@ export const TicketDetailPage: React.FC = () => {
                     className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md font-medium text-slate-700"
                   >
                     <option value="">-- Unassigned --</option>
-                    {agents?.map((ag) => (
+                    {agents?.filter(ag => ag.role === "admin" || ag.support_team_id === ticket.support_team_id).map((ag) => (
                       <option key={ag.id} value={ag.id}>
                         {ag.full_name} ({ag.support_team_name || ag.role})
                       </option>
@@ -772,27 +750,7 @@ export const TicketDetailPage: React.FC = () => {
                   {ticket.support_team_name || "General Triage"}
                 </span>
               </div>
-              {isStaff && (
-                <select
-                  value={ticket.support_team_id || ""}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    assignMutation.mutate({
-                      assigned_agent_id: ticket.assigned_agent?.id || null,
-                      support_team_id: val ? Number(val) : null,
-                    });
-                  }}
-                  aria-label="Assign support team"
-                  className="w-full mt-1 px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md font-medium text-slate-700"
-                >
-                  <option value="">Select Support Team...</option>
-                  {supportTeams?.map((team) => (
-                    <option key={team.id} value={team.id}>
-                      {team.name} ({team.code})
-                    </option>
-                  ))}
-                </select>
-              )}
+
             </div>
 
             {/* Metadata Details */}
@@ -815,6 +773,7 @@ export const TicketDetailPage: React.FC = () => {
                 <span className="text-slate-500">Created Date:</span>
                 <span className="text-slate-700">{formatDateTime(ticket.created_at)}</span>
               </div>
+              <div className="text-xs text-slate-600">Team received: {formatDateTime(ticket.team_received_at)}<br />Work started: {formatDateTime(ticket.work_started_at)}</div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Last Updated:</span>
                 <span className="text-slate-700">{formatDateTime(ticket.updated_at)}</span>

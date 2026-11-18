@@ -60,7 +60,7 @@ def evaluate_ticket_sla(ticket: Ticket, now: datetime | None = None) -> SLAStatu
     if first_resp_due:
         if first_resp_at and first_resp_at > first_resp_due:
             response_breached = True
-        elif not first_resp_at and current > first_resp_due and ticket.status not in ("resolved", "closed"):
+        elif not first_resp_at and current > first_resp_due and ticket.status not in ("resolved", "closed", "transferred"):
             response_breached = True
 
     # Resolution breach & remaining time
@@ -69,8 +69,8 @@ def evaluate_ticket_sla(ticket: Ticket, now: datetime | None = None) -> SLAStatu
     is_overdue = False
 
     if res_due:
-        if ticket.status in ("resolved", "closed"):
-            effective_end = resolved_at or ensure_utc(ticket.closed_at) or current
+        if ticket.status in ("resolved", "closed", "transferred"):
+            effective_end = (ensure_utc(ticket.transferred_at) or ensure_utc(ticket.closed_at) or ensure_utc(ticket.updated_at) or current) if ticket.transferred_at or ticket.status == "transferred" else (resolved_at or ensure_utc(ticket.closed_at) or current)
             assert effective_end is not None
             if effective_end > res_due:
                 resolution_breached = True
@@ -83,8 +83,12 @@ def evaluate_ticket_sla(ticket: Ticket, now: datetime | None = None) -> SLAStatu
                 resolution_breached = True
                 is_overdue = True
 
-    if resolution_breached:
+    if ticket.status in ("closed", "transferred"):
+        sla_health = "closed"
+    elif resolution_breached:
         sla_health = "breached"
+    elif ticket.status == "transferred":
+        sla_health = "within_sla"
     elif ticket.status in ("resolved", "closed"):
         sla_health = "met"
     elif remaining_minutes is not None and remaining_minutes <= max(30, int(res_target * 0.2)):

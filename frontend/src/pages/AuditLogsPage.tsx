@@ -4,10 +4,11 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
+  Download,
   Lock,
   Search,
 } from "lucide-react";
-import { apiRequest } from "../services/api";
+import { apiRequest, downloadAuthorizedBlob } from "../services/api";
 import { PaginatedAuditLogs } from "../types";
 import { RoleBadge } from "../components/ui/Badges";
 import { formatDateTime } from "../utils/format";
@@ -16,11 +17,14 @@ export const AuditLogsPage: React.FC = () => {
   const [search, setSearch] = useState("");
   const [entityFilter, setEntityFilter] = useState("all");
   const [page, setPage] = useState(1);
+  const [exporting, setExporting] = useState(false);
 
-  const buildQuery = () => {
+  const buildQuery = (includePagination = true) => {
     const params = new URLSearchParams();
-    params.set("page", String(page));
-    params.set("page_size", "20");
+    if (includePagination) {
+      params.set("page", String(page));
+      params.set("page_size", "20");
+    }
     if (search.trim()) params.set("search", search.trim());
     if (entityFilter !== "all") params.set("entity_type", entityFilter);
     return params.toString();
@@ -28,8 +32,21 @@ export const AuditLogsPage: React.FC = () => {
 
   const { data, isLoading } = useQuery<PaginatedAuditLogs>({
     queryKey: ["audit-logs", page, search, entityFilter],
-    queryFn: () => apiRequest<PaginatedAuditLogs>(`/audit-logs?${buildQuery()}`),
+    queryFn: () => apiRequest<PaginatedAuditLogs>(`/audit-logs?${buildQuery(true)}`),
   });
+
+  const handleExportCSV = async () => {
+    setExporting(true);
+    try {
+      const qs = buildQuery(false);
+      await downloadAuthorizedBlob(
+        `/audit-logs/export/csv${qs ? `?${qs}` : ""}`,
+        `ticketdesk_audit_logs_${new Date().toISOString().slice(0, 10)}.csv`
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -42,10 +59,21 @@ export const AuditLogsPage: React.FC = () => {
             Immutable, append-only audit trail of authentication events, ticket changes, role modifications, and administrative updates.
           </p>
         </div>
-        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">
-          <Lock className="w-3.5 h-3.5 text-emerald-400" />
-          Append-Only Compliance Ledger
-        </span>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold">
+            <Lock className="w-3.5 h-3.5 text-emerald-400" />
+            Append-Only Compliance Ledger
+          </span>
+          <button
+            type="button"
+            onClick={handleExportCSV}
+            disabled={exporting}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>{exporting ? "Exporting CSV..." : "Export Audit Logs (CSV)"}</span>
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -76,6 +104,7 @@ export const AuditLogsPage: React.FC = () => {
           <option value="all">All Entity Types</option>
           <option value="ticket">Tickets</option>
           <option value="user">Users & Auth</option>
+          <option value="support_team">Support Teams</option>
           <option value="sla_policy">SLA Policies</option>
           <option value="knowledge_article">Knowledge Base</option>
           <option value="system_settings">System Settings</option>
