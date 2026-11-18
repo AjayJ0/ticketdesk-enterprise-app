@@ -1,0 +1,90 @@
+from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr, Field
+from app.schemas.auth import DepartmentInfo, SupportTeamInfo, UserRoleInfo
+
+
+class UserSummary(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    employee_id: Optional[str] = None
+    job_title: Optional[str] = None
+    role: str
+    department_name: Optional[str] = None
+    support_team_name: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class UserDetailResponse(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    employee_id: Optional[str] = None
+    job_title: Optional[str] = None
+    phone: Optional[str] = None
+    is_active: bool
+    role: str
+    role_id: int
+    department_id: Optional[int] = None
+    support_team_id: Optional[int] = None
+    role_info: Optional[UserRoleInfo] = None
+    department: Optional[DepartmentInfo] = None
+    support_team: Optional[SupportTeamInfo] = None
+    last_login_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserCreateRequest(BaseModel):
+    email: EmailStr
+    full_name: str = Field(..., min_length=2, max_length=150)
+    password: str = Field(..., min_length=8, max_length=128)
+    employee_id: Optional[str] = Field(None, max_length=50)
+    job_title: Optional[str] = Field(None, max_length=120)
+    phone: Optional[str] = Field(None, max_length=40)
+    role: str = Field("employee", pattern="^(employee|agent|admin)$")
+    department_id: Optional[int] = None
+    support_team_id: Optional[int] = None
+    is_active: bool = True
+
+
+class UserUpdateRequest(BaseModel):
+    full_name: Optional[str] = Field(None, min_length=2, max_length=150)
+    employee_id: Optional[str] = Field(None, max_length=50)
+    job_title: Optional[str] = Field(None, max_length=120)
+    phone: Optional[str] = Field(None, max_length=40)
+    department_id: Optional[int] = None
+    support_team_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
+
+
+class UserRoleUpdateRequest(BaseModel):
+    role: str = Field(..., pattern="^(employee|agent|admin)$")
+    support_team_id: Optional[int] = None
+
+
+class PaginatedUsersResponse(BaseModel):
+    items: List[UserDetailResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class SupportTeamCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    code: str = Field(..., min_length=2, max_length=30)
+    description: Optional[str] = None
+    specialization: Optional[str] = None
+
+
+class DepartmentCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    code: str = Field(..., min_length=2, max_length=30)
+    description: Optional[str] = None
+    location: Optional[str] = None

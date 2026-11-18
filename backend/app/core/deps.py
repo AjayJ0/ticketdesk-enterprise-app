@@ -1,0 +1,85 @@
+from typing import Callable, Sequence
+import jwt
+from fastapi import Depends, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from app.core.exceptions import AppException
+from app.core.security import decode_access_token
+from app.models.user import User
+
+security_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    if not credentials or not credentials.credentials:
+        raise AppException(
+            message="Authentication credentials were not provided.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            error_code="NOT_AUTHENTICATED",
+        )
+
+    token = credentials.credentials
+    try:
+        payload = decode_access_token(token)
+        if payload.get("type") != "access":
+            raise AppException(
+                message="Invalid token type.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                error_code="INVALID_TOKEN_TYPE",
+            )
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise AppException(
+                message="Token payload missing subject.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                error_code="INVALID_TOKEN",
+            )
+    except jwt.ExpiredSignatureError:
+        raise AppException(
+            message="Access token has expired. Please refresh your token or sign in again.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            error_code="TOKEN_EXPIRED",
+        )
+    except jwt.InvalidTokenError:
+        raise AppException(
+            message="Invalid or malformed authentication token.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            error_code="INVALID_TOKEN",
+        )
+
+    user = db.query(User).filter(User.id == int(user_id)).first()
+    if not user:
+        raise AppException(
+            message="Authenticated user account no longer exists.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            error_code="USER_NOT_FOUND",
+        )
+    if not user.is_active:
+        raise AppException(
+            message="Your user account has been deactivated. Contact an administrator.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            error_code="ACCOUNT_DEACTIVATED",
+        )
+
+    return user
+
+
+def require_roles(allowed_roles: Sequence[str]) -> Callable[[User], User]:
+    def role_checker(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role not in allowed_roles:
+            raise AppException(
+                message=f"Access denied. Required role: {', '.join(allowed_roles)}.",
+                status_code=status.HTTP_403_FORBIDDEN,
+                error_code="INSUFFICIENT_PERMISSIONS",
+            )
+        return current_user
+
+    return role_checker
+
+
+require_admin = require_roles(["admin"])
+require_agent_or_admin = require_roles(["agent", "admin"])
