@@ -1,18 +1,25 @@
+x-logging: &local-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:16-alpine
     container_name: ticketdesk_postgres
     restart: unless-stopped
+    logging: *local-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ticketdesk}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ticketdesk_secret}
       POSTGRES_DB: ${POSTGRES_DB:-ticketdesk_db}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ticketdesk} -d ${POSTGRES_DB:-ticketdesk_db}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -23,6 +30,9 @@ services:
       dockerfile: Dockerfile
     container_name: ticketdesk_backend
     restart: unless-stopped
+    logging: *local-logging
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     depends_on:
       db:
         condition: service_healthy
@@ -30,7 +40,7 @@ services:
       APP_NAME: "TicketDesk Enterprise"
       APP_ENV: ${APP_ENV:-development}
       DEBUG: ${DEBUG:-true}
-      SECRET_KEY: ${SECRET_KEY:-change-this-in-production-to-a-secure-256-bit-hex-secret-key-0987654321}
+      SECRET_KEY:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ticketdesk}:${POSTGRES_PASSWORD:-ticketdesk_secret}@db:5432/${POSTGRES_DB:-ticketdesk_db}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
       LOCAL_UPLOAD_DIR: /app/uploads
@@ -38,26 +48,33 @@ services:
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-ticketdesk-enterprise-attachments}
       BACKEND_CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000"]'
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./backend:/app
+      - ./backend/app:/app/app:ro
+      - ./backend/migrations:/app/migrations:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
       - backend_uploads:/app/uploads
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: development
     container_name: ticketdesk_frontend
     restart: unless-stopped
+    logging: *local-logging
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     environment:
       VITE_API_BASE_URL: http://localhost:8000/api/v1
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     volumes:
-      - ./frontend:/app
-      - /app/node_modules
+      - ./frontend/src:/app/src:ro
+      - ./frontend/index.html:/app/index.html:ro
 
 volumes:
   postgres_data:

@@ -53,7 +53,14 @@ export const LoginPage: React.FC = () => {
   const [fpError, setFpError] = useState<string | null>(null);
   const [fpLoading, setFpLoading] = useState(false);
 
-  const from = (location.state as { from?: { pathname?: string } })?.from?.pathname || "/dashboard";
+  const returnPath = (location.state as { from?: { pathname?: unknown } } | null)?.from?.pathname;
+  const from =
+    typeof returnPath === "string" &&
+    returnPath.startsWith("/") &&
+    !returnPath.startsWith("//") &&
+    !/[\\?#\u0000-\u0020\u007f]/.test(returnPath)
+      ? returnPath
+      : "/dashboard";
 
   const {
     register,
@@ -73,7 +80,7 @@ export const LoginPage: React.FC = () => {
     setResetSuccessBanner(null);
     try {
       await login(values.email, values.password);
-      navigate(from, { replace: true });
+      navigate({ pathname: from }, { replace: true });
     } catch (err) {
       if (err instanceof ApiError) {
         setServerError(err.message);

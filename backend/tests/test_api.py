@@ -139,7 +139,7 @@ def test_admin_provisions_users_and_ticket_lifecycle(client: TestClient):
     assert created_ticket["support_team_id"] == teams[0]["id"]
 
 
-def test_forgot_password_via_phone_otp(client: TestClient):
+def test_forgot_password_via_phone_otp(client: TestClient, caplog):
     # Request OTP for custom.employee@ticketdesk.enterprise using phone +91 9876543210
     otp_req = client.post(
         "/api/v1/auth/forgot-password/request-otp",
@@ -150,6 +150,8 @@ def test_forgot_password_via_phone_otp(client: TestClient):
     assert otp_data["success"] is True
     dev_otp = otp_data["dev_otp_code"]
     assert dev_otp and len(dev_otp) == 6
+    assert "Password reset verification code generated" in caplog.messages
+    assert all(dev_otp not in message for message in caplog.messages)
 
     # Verify OTP and set a new password
     reset_resp = client.post(

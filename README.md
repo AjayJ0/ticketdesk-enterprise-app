@@ -66,6 +66,7 @@ docker compose up --build -d
 
 - **Backend & AWS Lambda Pytest Suite**:
   ```bash
+  python -m pip install -r backend/requirements.txt -r backend/requirements-test.txt
   PYTHONPATH=backend pytest backend/tests/test_api.py lambda/file_processor/tests/test_handler.py -v
   ```
 - **Frontend Vitest Component & Utility Suite**:
