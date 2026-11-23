@@ -5,7 +5,7 @@ import { App } from "../App";
 import type { RoleType } from "../types";
 
 const auth = vi.hoisted(() => ({
-  user: null as { role: RoleType } | null,
+  user: null as { role: RoleType; must_change_password: boolean } | null,
   login: vi.fn(),
 }));
 
