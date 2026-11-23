@@ -92,21 +92,21 @@ describe("BrowserRouter navigation", () => {
   });
 
   it.each(["employee", "agent"] as const)("redirects a signed-in %s away from the administrator route", async (role) => {
-    auth.user = { role };
+    auth.user = { role, must_change_password: false };
     startAt("/admin/users");
     expect(await screen.findByRole("heading", { name: "Workspace dashboard" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Administrator users" })).not.toBeInTheDocument();
   });
 
   it("renders the administrator nested route for an administrator", async () => {
-    auth.user = { role: "admin" };
+    auth.user = { role: "admin", must_change_password: false };
     startAt("/admin/users");
     expect(await screen.findByRole("heading", { name: "Administrator users" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/admin/users");
   });
 
   it("routes an unknown authenticated path to the dashboard", async () => {
-    auth.user = { role: "employee" };
+    auth.user = { role: "employee", must_change_password: false };
     startAt("/unknown-route");
     expect(await screen.findByRole("heading", { name: "Workspace dashboard" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/dashboard");
