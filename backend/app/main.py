@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine, get_db
+import app.services.ticket_log_sync  # Register history synchronization
 from app.core.exceptions import register_exception_handlers
 from app.core.logging_config import logger
 from app.core.schema import SchemaNotCurrent, require_current_schema
