@@ -43,7 +43,7 @@ jobs:
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids i-05e5f9475dc812968 \
             --document-name AWS-RunShellScript \
-            --parameters "{\"commands\":[\"sudo /home/ec2-user/ticketdesk-enterprise-app/scripts/deploy-ecr.sh ${IMAGE_TAG}\"]}" \
+            --parameters "{\"commands\":[\"sudo /home/ec2-user/ticketdesk-enterprise-app/scripts/deploy-ecr.sh check ${IMAGE_TAG}\"]}" \
             --query 'Command.CommandId' \
             --output text)
 
@@ -58,3 +58,4 @@ jobs:
             --instance-id i-05e5f9475dc812968 \
             --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}' \
             --output json
+
