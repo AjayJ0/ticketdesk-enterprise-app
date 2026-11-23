@@ -50,7 +50,8 @@ async function signIn() {
 beforeEach(() => {
   auth.user = null;
   auth.login.mockReset().mockImplementation(async () => {
-    auth.user = { role: "employee" };
+    auth.user = { role: "employee", must_change_password: false };
+    return auth.user;
   });
 });
 
