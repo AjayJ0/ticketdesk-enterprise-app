@@ -22,7 +22,6 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: production
 
     steps:
       - name: Configure AWS credentials
@@ -79,5 +78,6 @@ jobs:
             --output json
 
           test "$STATUS" = "Success"
+
 
 
